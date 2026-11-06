@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.navigation
 
 import ru.slartus.boostbuddy.data.repositories.models.Content
@@ -20,6 +21,7 @@ object NavigationTree {
     ) : Screen
 
     data object AppSettings : Screen
+    class Message(val text: String) : Screen
 
     data object Logout : Screen
     class Qr(val title: String, val url: String) : Screen
@@ -27,6 +29,13 @@ object NavigationTree {
         val blogUrl: String,
         val postId: String,
         val postData: Content.OkVideo,
+    ) : Screen
+
+    class LiveStream(
+        val blogUrl: String,
+        val streamId: String,
+        val postData: Content.OkVideo,
+        val startedAtSeconds: Long?,
     ) : Screen
 
 

@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
@@ -49,6 +50,21 @@ import ru.slartus.boostbuddy.ui.screens.blog.FocusableBox
 import ru.slartus.boostbuddy.ui.screens.blog.PollView
 import ru.slartus.boostbuddy.ui.widgets.FeedBox
 
+private const val HEADER_NEAR_TOP_INDEX_THRESHOLD = 1
+
+@Composable
+private fun ScrollToHeaderOnAppearEffect(
+    hasHeader: Boolean,
+    listScrollState: LazyListState,
+) {
+    LaunchedEffect(hasHeader) {
+        if (hasHeader &&
+            listScrollState.firstVisibleItemIndex <= HEADER_NEAR_TOP_INDEX_THRESHOLD
+        ) {
+            listScrollState.scrollToItem(0)
+        }
+    }
+}
 
 @Composable
 internal fun PostsView(
@@ -62,18 +78,23 @@ internal fun PostsView(
     onCommentsClick: (post: Post) -> Unit,
     onPollOptionClick: (Post, Poll, PollOption) -> Unit,
     onVoteClick: (Post, poll: Poll) -> Unit,
-    onDeleteVoteClick: (Post, poll: Poll) -> Unit
+    onDeleteVoteClick: (Post, poll: Poll) -> Unit,
+    header: (@Composable () -> Unit)? = null,
 ) {
     FeedBox {
         if (items.isEmpty()) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Center,
-            ) {
-                Text(text = "Нет постов")
+            Column(modifier = Modifier.fillMaxSize()) {
+                header?.invoke()
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Center,
+                ) {
+                    Text(text = "Нет постов")
+                }
             }
         } else {
             val listScrollState = rememberLazyListState()
+            val hasHeader = header != null
 
             val endOfListReached = remember {
                 derivedStateOf {
@@ -85,6 +106,11 @@ internal fun PostsView(
                 state = listScrollState,
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                if (header != null) {
+                    item(key = "live_stream_header", contentType = "live_stream_header") {
+                        header()
+                    }
+                }
                 items(items, key = { it.key }, contentType = { it.contentType }) { item ->
                     when (item) {
                         is FeedPostItem.ErrorItem -> ErrorView(
@@ -110,6 +136,10 @@ internal fun PostsView(
                     onScrolledToEnd()
                 }
             }
+            ScrollToHeaderOnAppearEffect(
+                hasHeader = hasHeader,
+                listScrollState = listScrollState,
+            )
         }
     }
 }

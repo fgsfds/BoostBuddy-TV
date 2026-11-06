@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.data.repositories.models
 
 import androidx.compose.runtime.Immutable
@@ -26,7 +27,8 @@ sealed class Content {
         val title: String,
         val playerUrls: List<PlayerUrl>,
         val previewUrl: String,
-        val timeCode: Long
+        val timeCode: Long,
+        val durationSeconds: Long = 0,
     ) : Content()
 
     @Serializable

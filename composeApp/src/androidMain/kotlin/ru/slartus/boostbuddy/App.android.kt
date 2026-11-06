@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy
 
 import android.app.Application
@@ -15,11 +16,13 @@ import androidx.lifecycle.LifecycleOwner
 import com.arkivanov.decompose.defaultComponentContext
 import ru.slartus.boostbuddy.components.RootComponentImpl
 import ru.slartus.boostbuddy.data.Inject
-import ru.slartus.boostbuddy.data.analytic.AppMetricaAnalyticsTracker
 import ru.slartus.boostbuddy.data.analytic.analytics
 import ru.slartus.boostbuddy.data.log.debugLogBuild
 import ru.slartus.boostbuddy.ui.common.LocalPlatformConfiguration
 import ru.slartus.boostbuddy.ui.screens.RootScreen
+import ru.slartus.boostbuddy.ui.tv.TvMainScreen
+import ru.slartus.boostbuddy.ui.tv.TvBlogScreen
+import ru.slartus.boostbuddy.ui.tv.rememberTvBrowseState
 import ru.slartus.boostbuddy.utils.GlobalExceptionHandlersChain
 import ru.slartus.boostbuddy.utils.Permissions
 import ru.slartus.boostbuddy.utils.Platform
@@ -38,11 +41,7 @@ class AndroidApp : Application() {
         debugLogBuild()
         PlatformDataConfiguration.createDependenciesTree(
             PlatformConfiguration(this, getPlatform()),
-            buildList {
-                if (!BuildConfig.DEBUG) {
-                    add(AppMetricaAnalyticsTracker(this@AndroidApp))
-                }
-            }
+            emptyList()
         )
     }
 
@@ -89,7 +88,19 @@ open class BaseComponentActivity : ComponentActivity() {
             CompositionLocalProvider(
                 LocalPlatformConfiguration provides Inject.instance<PlatformConfiguration>()
             ) {
-                RootScreen(component = root, modifier = Modifier.fillMaxSize())
+                val configuration = LocalPlatformConfiguration.current
+                if (configuration.platform == Platform.AndroidTV || this@BaseComponentActivity is TvAppActivity) {
+                    val browseState = rememberTvBrowseState()
+                    RootScreen(
+                        component = root,
+                        modifier = Modifier.fillMaxSize(),
+                        preferDarkTheme = true,
+                        mainContent = { main -> TvMainScreen(main, browseState) },
+                        blogContent = { blog, main -> TvBlogScreen(blog, main, browseState) },
+                    )
+                } else {
+                    RootScreen(component = root, modifier = Modifier.fillMaxSize())
+                }
             }
         }
     }

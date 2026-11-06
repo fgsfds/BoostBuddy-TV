@@ -1,43 +1,83 @@
-# Compose Multiplatform Application
+# BoostBuddy TV
 
-BoostBuddy - simple client for Boosty.
+A native Boosty client for **Google TV and Android TV**, built around a remote: browse your creators, find a video, and watch it in the native player.
 
-[Обсуждение на 4pda](https://4pda.to/forum/index.php?showtopic=1085976)
+[![Build TV APK](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml/badge.svg)](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml)
 
-Compose Multiplatform. Android and iOS targets
+[**Download an APK**](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml) · [Installation and build guide](README_TV.md) · [Validation](VALIDATION_TV.md)
 
-![1f8bceb4-b697-42b1-93c5-1c53fd6475b1.jpeg](images%2F1f8bceb4-b697-42b1-93c5-1c53fd6475b1.jpeg)
-![f6c1c2e4-481e-49d1-b4cc-ecb5e8e6725f.jpeg](images%2Ff6c1c2e4-481e-49d1-b4cc-ecb5e8e6725f.jpeg)
-![1158375f-fe37-4299-9572-6c4425853c9d.jpeg](images%2F1158375f-fe37-4299-9572-6c4425853c9d.jpeg)
+An independent fork of [slartus/BoostBuddy](https://github.com/slartus/BoostBuddy), based on version **1.16.0**. This is an unofficial client; watching paid content requires access through your own Boosty account.
 
-Используемые библиотеки:
-------
-    Kotlin-Multiplatform https://github.com/JetBrains/kotlin
-    Kotlinx.coroutines https://github.com/Kotlin/kotlinx.coroutines
-    Kotlinx-io https://github.com/Kotlin/kotlinx.collections.immutable/releases
-    Compose-Multiplatform https://github.com/JetBrains/compose-multiplatform
-    Decompose https://github.com/arkivanov/Decompose
-    Essently https://github.com/arkivanov/Essenty
-    ComposeImageLoader https://github.com/qdsfdhvh/compose-imageloader
-    Napier https://github.com/AAkira/Napier
-    Gradle-buildconfig-plugin https://github.com/gmazzo/gradle-buildconfig-plugin
-    Multiplatform Settings https://github.com/russhwolf/multiplatform-settings
-    Kodein https://github.com/kosi-libs/Kodein
-    Exoplayer https://github.com/androidx/media
-    Collections immutable https://github.com/Kotlin/kotlinx.collections.immutable/releases
-License
--------
+## Features
 
-    Copyright 2024 Artem Slinkin <slartus@gmail.com>
-    
-    Licensed under the Apache License, Version 2.0 (the "License");
-    you may not use this file except in compliance with the License.
-    You may obtain a copy of the License at
+- **TV browsing:** collapsible sidebar, creator directory, video grid, search, and clear D-pad focus.
+- **Native sign-in:** phone and verification-code forms, editable country code, resend cooldown, and an optional website fallback.
+- **Complete subscription loading:** follows pagination beyond the first 30 entries and deduplicates creators.
+- **Video cards:** artwork, duration, date, resume progress, and locked or processing states; multiple videos in one post become separate cards.
+- **Native playback:** reuses BoostBuddy's Media3 player, quality selection, and resume support.
+- **Separate installation:** the `ru.slartus.boostbuddy.tvfork` package can coexist with upstream BoostBuddy. Android **7.0 / API 24** or newer is required.
 
-       http://www.apache.org/licenses/LICENSE-2.0
+The interface is currently in Russian. **Лента** = Feed, **Подписки** = Subscriptions, **Поиск** = Search, **Настройки** = Settings.
 
-    Unless required by applicable law or agreed to in writing, software
-    distributed under the License is distributed on an "AS IS" BASIS,
-    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-    See the License for the specific language governing permissions and
-    limitations under the License.
+## Screenshots
+
+Actual, unedited captures from an Android TV emulator at **1280 × 720**. Click an image to view it at full size. [Capture details and reproduction steps](docs/screenshots/README.md).
+
+### Native phone login
+
+[![Native BoostBuddy TV sign-in screen with an empty phone-number field](docs/screenshots/tv-login.png)](docs/screenshots/tv-login.png)
+
+*The normal TV activity, with the phone-number field empty and the keyboard dismissed. No account sign-in or verification-code request was performed.*
+
+### Video feed — offline demo data
+
+[![BoostBuddy TV video grid and sidebar showing fictional offline demo videos](docs/screenshots/tv-feed-demo.png)](docs/screenshots/tv-feed-demo.png)
+
+*The app's real TV components rendered with fictional local videos and artwork. The visible “DEMO DATA · OFFLINE” label identifies the fixture; this is not a connected account or a playback test.*
+
+### Subscriptions — offline demo data
+
+[![BoostBuddy TV subscriptions directory showing fictional offline demo creators](docs/screenshots/tv-subscriptions-demo.png)](docs/screenshots/tv-subscriptions-demo.png)
+
+*The real creator-directory component using fictional local creators. “DEMO DATA · OFFLINE” remains visible; no live subscription data is shown.*
+
+## Get an APK
+
+1. Open [**Actions → Build TV APK**](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml).
+2. Select a successful run for the commit you want, then use **Download APK artifact** in its summary, or the artifact whose name starts with `BoostBuddy-TV-`.
+3. Sign in to GitHub if needed, download the artifact **ZIP**, and extract it. It contains the APK, `SHA256SUMS`, `build-info.json`, and installation notes.
+4. Transfer the extracted APK to your TV and install it with an APK installer or `adb`. Launch **BoostBuddy TV**.
+
+The [workflow](.github/workflows/build-tv.yml) builds and runs unit tests on **every branch push, pull request, and manual run**. APK filenames include the app version, version code, and built commit. APKs and reports are retained for **14 days**, subject to repository policy; failed builds do not publish an APK.
+
+**Signing and updates:** CI produces debug APKs with a fresh runner's debug key. A later CI build may require uninstalling the previous one, which removes local sign-in and settings. For updates that install over one another, use a persistent signing key you control; see [release signing](README_TV.md#release-signing). CI artifacts are not GitHub Releases or a Play Store distribution.
+
+## Sign in
+
+Use the phone number already linked to the Boosty account with your subscriptions. `+381` and `+7` are shortcuts; any supported country calling code can be entered explicitly. Choose **Получить код**, then enter the verification code.
+
+Check messages in the Boosty app, a linked Telegram bot, or SMS: delivery is controlled by Boosty. If your account uses Google or email, first [link a phone number in your Boosty profile](https://boosty.to/boosty/posts/e2ca36ab-73ac-44b9-9890-660f9ebd7c3c), or choose **Войти через сайт** for the website fallback.
+
+## Build locally
+
+With **JDK 17**, Android SDK **35**, and Build Tools **35.x** configured:
+
+```sh
+./gradlew :composeApp:assembleDebug :composeApp:testDebugUnitTest
+```
+
+The APK is written to `composeApp/build/outputs/apk/debug/composeApp-debug.apk`. Use `gradlew.bat` on Windows. See [README_TV.md](README_TV.md) for SDK setup, signing, installation, and the implementation map.
+
+## Validation and limits
+
+The clean local build passed **18 unit tests**. On an Android TV 10 emulator, the native login screen and offline browsing screens rendered successfully; D-pad movement between video cards, back to the sidebar, and into Subscriptions was checked. [Full validation record](VALIDATION_TV.md).
+
+**Live account sign-in, code delivery, token renewal against Boosty, and video playback have not been tested.** The screenshots demonstrate rendering and navigation with an empty login form or offline fixtures. Hardware playback and account access still need a device/account smoke test.
+
+Boosty's unofficial API can change. The TV grid focuses on native Boosty video attachments; external embedded players and a dedicated livestream directory are outside this first implementation. The inherited iOS target has not been built or validated for this fork.
+
+## License and origin
+
+Licensed under [Apache 2.0](LICENSE). Original BoostBuddy copyright **2024 Artem Slinkin**. The [upstream README and dependency credits](docs/UPSTREAM_README.md) are preserved, and [TV_FORK_CHANGES.md](TV_FORK_CHANGES.md) records the fork's modifications.
+
+The layout takes inspiration from SmartTube; no SmartTube source code or branding is included. Boosty and SmartTube are not affiliated with this fork.

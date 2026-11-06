@@ -1,5 +1,5 @@
-
 #!/usr/bin/env sh
+# Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 
 #
 # Copyright 2015 the original author or authors.

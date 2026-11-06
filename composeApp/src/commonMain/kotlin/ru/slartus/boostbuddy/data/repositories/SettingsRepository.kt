@@ -4,6 +4,8 @@ import com.russhwolf.settings.ExperimentalSettingsApi
 import com.russhwolf.settings.ObservableSettings
 import com.russhwolf.settings.coroutines.getBooleanFlow
 import com.russhwolf.settings.coroutines.getBooleanOrNullFlow
+import com.russhwolf.settings.coroutines.getFloatFlow
+import com.russhwolf.settings.coroutines.getStringOrNullFlow
 import com.russhwolf.settings.coroutines.getStringOrNullStateFlow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -11,9 +13,12 @@ import kotlinx.coroutines.IO
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import ru.slartus.boostbuddy.data.repositories.models.VideoQuality
+import kotlin.random.Random
 
 @OptIn(ExperimentalSettingsApi::class)
 internal class SettingsRepository(
@@ -29,12 +34,16 @@ internal class SettingsRepository(
         get() = combine(
             settings.getBooleanOrNullFlow(DARK_MODE_KEY),
             settings.getBooleanFlow(SYSTEM_PLAYER_KEY, false),
-            settings.getBooleanFlow(DEBUG_LOG, false)
-        ) { darkMode, systemPlayer, debugLog ->
+            settings.getBooleanFlow(DEBUG_LOG, false),
+            settings.getStringOrNullFlow(PREFERRED_QUALITY_KEY).map { it.toVideoQualityOrNull() },
+            settings.getFloatFlow(PREFERRED_PLAYBACK_SPEED_KEY, DEFAULT_PLAYBACK_SPEED)
+        ) { darkMode, systemPlayer, debugLog, preferredQuality, preferredPlaybackSpeed ->
             AppSettings(
                 isDarkMode = darkMode,
                 useSystemVideoPlayer = systemPlayer,
-                debugLog = debugLog
+                debugLog = debugLog,
+                preferredQuality = preferredQuality,
+                preferredPlaybackSpeed = preferredPlaybackSpeed
             )
         }
 
@@ -42,7 +51,13 @@ internal class SettingsRepository(
         AppSettings(
             isDarkMode = settings.getBooleanOrNull(DARK_MODE_KEY),
             useSystemVideoPlayer = settings.getBoolean(SYSTEM_PLAYER_KEY, false),
-            debugLog = settings.getBoolean(DEBUG_LOG, false)
+            debugLog = settings.getBoolean(DEBUG_LOG, false),
+            preferredQuality = settings.getStringOrNull(PREFERRED_QUALITY_KEY)
+                .toVideoQualityOrNull(),
+            preferredPlaybackSpeed = settings.getFloat(
+                PREFERRED_PLAYBACK_SPEED_KEY,
+                DEFAULT_PLAYBACK_SPEED
+            )
         )
     }
 
@@ -52,6 +67,18 @@ internal class SettingsRepository(
 
     suspend fun setUseSystemVideoPlayer(value: Boolean) = withContext(Dispatchers.IO) {
         putBoolean(SYSTEM_PLAYER_KEY, value)
+    }
+
+    suspend fun setPreferredQuality(value: VideoQuality?) = withContext(Dispatchers.IO) {
+        if (value == null) {
+            remove(PREFERRED_QUALITY_KEY)
+        } else {
+            putString(PREFERRED_QUALITY_KEY, value.name)
+        }
+    }
+
+    suspend fun setPreferredPlaybackSpeed(value: Float) = withContext(Dispatchers.IO) {
+        putFloat(PREFERRED_PLAYBACK_SPEED_KEY, value)
     }
 
     suspend fun setDebugLog(value: Boolean) = withContext(Dispatchers.IO) {
@@ -66,6 +93,53 @@ internal class SettingsRepository(
     }
 
     suspend fun getAccessToken(): String? = getString(ACCESS_TOKEN_KEY)
+
+    suspend fun putRefreshToken(value: String?) = withContext(Dispatchers.IO) {
+        if (value == null)
+            remove(REFRESH_TOKEN_KEY)
+        else
+            putString(REFRESH_TOKEN_KEY, value)
+    }
+
+    suspend fun getRefreshToken(): String? = getString(REFRESH_TOKEN_KEY)
+
+    suspend fun putTokenExpiresAt(value: Long?) = withContext(Dispatchers.IO) {
+        if (value == null)
+            remove(TOKEN_EXPIRES_AT_KEY)
+        else
+            putLong(TOKEN_EXPIRES_AT_KEY, value)
+    }
+
+    suspend fun getTokenExpiresAt(): Long? = getLong(TOKEN_EXPIRES_AT_KEY)
+
+    suspend fun getOrCreateDeviceId(): String = withContext(Dispatchers.IO) {
+        locker.withLock {
+            val existing = settings.getStringOrNull(DEVICE_ID_KEY)
+            if (existing != null) return@withLock existing
+            val generated = generateDeviceId()
+            settings.putString(DEVICE_ID_KEY, generated)
+            generated
+        }
+    }
+
+    private fun generateDeviceId(): String {
+        val bytes = ByteArray(16).also { Random.nextBytes(it) }
+        bytes[6] = ((bytes[6].toInt() and 0x0f) or 0x40).toByte()
+        bytes[8] = ((bytes[8].toInt() and 0x3f) or 0x80).toByte()
+        fun ByteArray.hex(from: Int, to: Int) = buildString {
+            for (i in from until to) {
+                val v = this@hex[i].toInt() and 0xff
+                append(v.toString(16).padStart(2, '0'))
+            }
+        }
+        return buildString {
+            append(bytes.hex(0, 4)); append('-')
+            append(bytes.hex(4, 6)); append('-')
+            append(bytes.hex(6, 8)); append('-')
+            append(bytes.hex(8, 10)); append('-')
+            append(bytes.hex(10, 16))
+        }
+    }
 
     suspend fun setLastDonateNotifyVersion(version: String) =
         putString(LAST_DONATE_NOTIFY_VERSION_KEY, version)
@@ -110,6 +184,12 @@ internal class SettingsRepository(
         }
     }
 
+    private suspend fun putFloat(key: String, value: Float) = withContext(Dispatchers.IO) {
+        locker.withLock {
+            settings.putFloat(key, value)
+        }
+    }
+
     private suspend fun getLong(key: String) = withContext(Dispatchers.IO) {
         locker.withLock {
             settings.getLongOrNull(key)
@@ -122,23 +202,47 @@ internal class SettingsRepository(
         }
     }
 
+    suspend fun getDonationPromptVersion(): String? =
+        settings.getString(KEY_DONATION_PROMPT_VERSION, "")
+
+    suspend fun setDonationPromptVersion(version: String) {
+        settings.putString(KEY_DONATION_PROMPT_VERSION, version)
+    }
+
     private companion object {
+        const val KEY_DONATION_PROMPT_VERSION = "KEY_DONATION_PROMPT_VERSION"
         const val ACCESS_TOKEN_KEY = "access_token"
+        const val REFRESH_TOKEN_KEY = "refresh_token"
+        const val TOKEN_EXPIRES_AT_KEY = "token_expires_at"
+        const val DEVICE_ID_KEY = "device_id"
         const val DARK_MODE_KEY = "dark_mode"
         const val SYSTEM_PLAYER_KEY = "system_player"
         const val DEBUG_LOG = "debug_log"
         const val LAST_DONATE_NOTIFY_VERSION_KEY = "LAST_DONATE_NOTIFY_VERSION_KEY"
+        const val PREFERRED_QUALITY_KEY = "preferred_video_quality"
+        const val PREFERRED_PLAYBACK_SPEED_KEY = "preferred_playback_speed"
+        const val DEFAULT_PLAYBACK_SPEED = 1f
     }
 }
+
+private fun String?.toVideoQualityOrNull(): VideoQuality? =
+    this?.let { name -> VideoQuality.entries.firstOrNull { it.name == name } }
 
 data class AppSettings(
     val isDarkMode: Boolean?,
     val useSystemVideoPlayer: Boolean,
-    val debugLog: Boolean
+    val debugLog: Boolean,
+    val preferredQuality: VideoQuality?,
+    val preferredPlaybackSpeed: Float
 ) {
     companion object {
-        val Default: AppSettings =
-            AppSettings(isDarkMode = null, useSystemVideoPlayer = false, debugLog = false)
+        val Default: AppSettings = AppSettings(
+            isDarkMode = null,
+            useSystemVideoPlayer = false,
+            debugLog = false,
+            preferredQuality = null,
+            preferredPlaybackSpeed = 1f
+        )
     }
 }
 

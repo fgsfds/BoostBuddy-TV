@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.data.repositories.models
 
 import androidx.compose.foundation.text.appendInlineContent
@@ -63,15 +64,41 @@ internal fun ContentResponse.mapToContentOrNull(): Content? {
     return when (type) {
         "ok_video" -> Content.OkVideo(
             id = id ?: return null,
-            vid = vid ?: return null,
+            vid = vid.orEmpty(),
             title = title.orEmpty(),
             playerUrls = playerUrls?.mapNotNull { it.mapToPlayerUrlOrNull() }.orEmpty()
                 .filter { it.quality.used }
-                .sortedWith(playerUrlsComparator)
-                .ifEmpty { return null },
-            previewUrl = preview ?: defaultPreview ?: return null,
-            timeCode = timeCode ?: 0
+                .sortedWith(playerUrlsComparator),
+            previewUrl = preview ?: defaultPreview.orEmpty(),
+            timeCode = (timeCode ?: 0).coerceAtLeast(0),
+            durationSeconds = (duration ?: 0).coerceAtLeast(0),
         )
+
+        "ok_stream" -> {
+            val streamVid = vid ?: return null
+            // MVP: для live-стримов используем только live-edge URL. DVR-вариант
+            // (`live_playback_*`, путь `_offset_p`) отфильтровываем — отматывание
+            // отключено в UI, и DVR-URL на cold start CDN всё равно 404-ит.
+            val liveEdgeUrls = playerUrls.orEmpty()
+                .mapNotNull { entry ->
+                    if (entry.type?.startsWith("live_playback") == true) return@mapNotNull null
+                    val playerUrl = entry.mapToPlayerUrlOrNull() ?: return@mapNotNull null
+                    if (!playerUrl.quality.used) return@mapNotNull null
+                    playerUrl
+                }
+                .distinctBy { it.quality }
+                .sortedWith(playerUrlsComparator)
+            if (liveEdgeUrls.isEmpty()) return null
+            Content.OkVideo(
+                id = id ?: streamVid,
+                vid = streamVid,
+                title = title.orEmpty(),
+                playerUrls = liveEdgeUrls,
+                previewUrl = preview ?: defaultPreview.orEmpty(),
+                timeCode = timeCode ?: 0,
+                durationSeconds = (duration ?: 0).coerceAtLeast(0),
+            )
+        }
 
         "video" -> Content.Video(
             url = url ?: return null,
@@ -118,7 +145,8 @@ internal fun ContentResponse.mapToContentOrNull(): Content? {
 }
 
 private fun ContentResponse.PlayerUrl.mapToPlayerUrlOrNull(): PlayerUrl? {
-    return PlayerUrl(VideoQuality.of(type), url ?: return null)
+    val safeUrl = url?.takeIf { it.isNotBlank() } ?: return null
+    return PlayerUrl(VideoQuality.of(type), safeUrl)
 }
 
 val linkColor = Color(241, 95, 44)

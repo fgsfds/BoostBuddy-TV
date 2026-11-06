@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Explicit preview entry without a launcher intent. Absent, with its fixtures, in release builds. -->
+        <activity
+            android:name="ru.slartus.boostbuddy.ui.tv.ScreenshotActivity"
+            android:exported="true"
+            android:screenOrientation="landscape"
+            android:windowSoftInputMode="adjustResize" />
+    </application>
+</manifest>

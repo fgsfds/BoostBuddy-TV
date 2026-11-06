@@ -53,6 +53,7 @@ class VideoTypeComponentImpl(
     }
 
     override fun onItemClicked(playerUrl: PlayerUrl) {
+        scope.launch { settingsRepository.setPreferredQuality(playerUrl.quality) }
         onItemClicked.invoke(playerUrl)
     }
 

@@ -25,10 +25,16 @@ actual fun VideoPlayer(
     vid: String,
     playerUrl: PlayerUrl,
     title: String,
+    postTitle: String,
     position: Long,
+    playbackSpeed: Float,
+    isLive: Boolean,
+    liveStartedAtSeconds: Long?,
+    retryToken: Int,
     onVideoStateChange: (VideoState) -> Unit,
     onContentPositionChange: (Long) -> Unit,
-    onStopClick: () -> Unit
+    onStopClick: () -> Unit,
+    onSettingsClick: (() -> Unit)?
 ) {
 
     val player = remember { AVPlayer(uRL = NSURL.URLWithString(playerUrl.url)!!) }

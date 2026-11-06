@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.components.feed
 
 import androidx.compose.runtime.Immutable
@@ -5,6 +6,8 @@ import com.arkivanov.decompose.ComponentContext
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import ru.slartus.boostbuddy.components.BaseComponent
 import ru.slartus.boostbuddy.components.common.ProgressState
 import ru.slartus.boostbuddy.data.Inject
@@ -42,6 +45,11 @@ abstract class PostsFeedComponent<State : Any, Action>(
     private val settingsRepository by Inject.lazy<SettingsRepository>()
     private val postRepository by Inject.lazy<PostRepository>()
 
+    private var fetchJob: Job? = null
+    private var fetchGeneration = 0L
+    private var hadToken = false
+    private val successfulCursors = mutableSetOf<String>()
+
     protected abstract val extra: Extra?
     protected abstract val viewStateItems: List<FeedPostItem>
 
@@ -54,8 +62,22 @@ abstract class PostsFeedComponent<State : Any, Action>(
     }
 
     protected open fun tokenChanged(token: String?) {
-        if (token != null)
-            fetchData()
+        if (token != null) {
+            // A token refresh can finish inside the current HTTP request. Do not
+            // cancel that request when its newly issued token is stored.
+            if (!hadToken) {
+                hadToken = true
+                fetchData()
+            }
+        } else {
+            hadToken = false
+            fetchGeneration++
+            fetchJob?.cancel()
+            successfulCursors.clear()
+            onNewItems(emptyList<FeedPostItem>().toImmutableList())
+            onIsRefreshingChanged(false)
+            onProgressStateChanged(ProgressState.Init)
+        }
     }
 
     protected abstract suspend fun fetch(offset: String?): Result<Posts>
@@ -67,59 +89,93 @@ abstract class PostsFeedComponent<State : Any, Action>(
         extra: Extra? = null
     )
 
-    private fun fetchData() {
+    protected open fun onIsRefreshingChanged(isRefreshing: Boolean) = Unit
+
+    private fun fetchData(isRefresh: Boolean = false) {
+        val generation = ++fetchGeneration
+        fetchJob?.cancel()
+        successfulCursors.clear()
+        onIsRefreshingChanged(isRefresh)
         onProgressStateChanged(ProgressState.Loading)
-        scope.launch {
-            val response = fetch(null)
-            if (response.isSuccess) {
-                val data = response.getOrNull()
-                val newItems = data?.items.orEmpty()
-                    .map { FeedPostItem.PostItem(it) }
-                    .toImmutableList()
-                onNewItems(items = newItems, extra = data?.extra)
-                onProgressStateChanged(ProgressState.Loaded)
-            } else {
-                onProgressStateChanged(
-                    ProgressState.Error(
-                        response.exceptionOrNull()?.messageOrThrow() ?: "Ошибка загрузки"
-                    )
-                )
+        fetchJob = scope.launch {
+            try {
+                settingsRepository.getAccessToken() ?: unauthorizedError()
+                coroutineContext.ensureActive()
+                if (generation != fetchGeneration) return@launch
+                val response = fetch(null)
+                coroutineContext.ensureActive()
+                if (generation != fetchGeneration) return@launch
+                if (response.isSuccess) {
+                    val data = response.getOrNull()
+                    val newItems = data?.items.orEmpty()
+                        .map { FeedPostItem.PostItem(it) }
+                        .distinctBy { it.key }
+                        .toImmutableList()
+                    onNewItems(items = newItems, extra = usableCursor(data?.extra))
+                    onProgressStateChanged(ProgressState.Loaded)
+                } else {
+                    onProgressStateChanged(ProgressState.Error(
+                        response.exceptionOrNull()?.messageOrThrow() ?: "Unable to load videos"
+                    ))
+                }
+            } finally {
+                if (generation == fetchGeneration) onIsRefreshingChanged(false)
             }
         }
     }
 
-    private fun fetchData(offset: String?) {
-        onNewItems(viewStateItems.plusItem(FeedPostItem.LoadingItem))
-        scope.launch {
-            val response = fetch(offset = offset)
+    private fun fetchData(offset: String) {
+        if (fetchJob?.isActive == true) return
+        val generation = fetchGeneration
+        val previousExtra = extra
+        onNewItems(viewStateItems.plusItem(FeedPostItem.LoadingItem), previousExtra)
+        fetchJob = scope.launch {
+            val response = fetch(offset)
+            coroutineContext.ensureActive()
+            if (generation != fetchGeneration) return@launch
             if (response.isSuccess) {
                 val data = response.getOrNull()
-                val newItems =
-                    viewStateItems
-                        .plusItems(data?.items.orEmpty().map { FeedPostItem.PostItem(it) })
-
-                onNewItems(newItems, data?.extra)
+                successfulCursors.add(offset)
+                val nextExtra = usableCursor(data?.extra)?.let {
+                    if (it.offset in successfulCursors) it.copy(isLast = true) else it
+                }
+                val newItems = viewStateItems.plusItems(
+                    data?.items.orEmpty().map { FeedPostItem.PostItem(it) }
+                )
+                onNewItems(newItems, nextExtra)
                 onProgressStateChanged(ProgressState.Loaded)
             } else {
-                onNewItems(
-                    viewStateItems.plusItem(
-                        FeedPostItem.ErrorItem(
-                            response.exceptionOrNull()?.messageOrThrow() ?: "Ошибка загрузки"
-                        )
-                    ), extra
-                )
+                onNewItems(viewStateItems.plusItem(FeedPostItem.ErrorItem(
+                    response.exceptionOrNull()?.messageOrThrow() ?: "Unable to load more videos"
+                )), previousExtra)
             }
         }
+    }
+
+    private fun usableCursor(value: Extra?): Extra? = value?.let {
+        if (it.offset.isBlank()) it.copy(isLast = true) else it
     }
 
     protected fun fetchNext() {
+        if (fetchJob?.isActive == true) return
+        val generation = fetchGeneration
         scope.launch {
             settingsRepository.getAccessToken() ?: unauthorizedError()
-            fetchData(extra?.offset)
+            if (generation != fetchGeneration) return@launch
+            val page = extra?.takeUnless { it.isLast } ?: return@launch
+            fetchData(page.offset)
         }
     }
 
     fun onVideoItemClicked(post: Post, postData: Content.OkVideo) {
+        if (!post.hasAccess) {
+            navigationRouter.navigateTo(NavigationTree.Message("Your account does not have access to this post."))
+            return
+        }
+        if (postData.playerUrls.none { it.url.isNotBlank() }) {
+            navigationRouter.navigateTo(NavigationTree.Message("This video is not ready to play. Refresh the feed and try again later."))
+            return
+        }
         navigationRouter.navigateTo(
             NavigationTree.VideoType(
                 blogUrl = post.user.blogUrl,
@@ -130,10 +186,11 @@ abstract class PostsFeedComponent<State : Any, Action>(
     }
 
     fun refresh() {
-        scope.launch {
-            settingsRepository.getAccessToken() ?: unauthorizedError()
-            fetchData()
-        }
+        fetchData()
+    }
+
+    open fun onPullToRefresh() {
+        fetchData(isRefresh = true)
     }
 
     fun onErrorItemClicked() {

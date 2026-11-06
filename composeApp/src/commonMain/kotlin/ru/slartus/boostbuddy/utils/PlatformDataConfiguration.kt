@@ -7,16 +7,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
 import org.kodein.di.DI
 import org.kodein.di.bindProvider
 import org.kodein.di.bindSingleton
 import org.kodein.di.instance
 import org.kodein.di.new
 import ru.slartus.boostbuddy.data.Inject
+import ru.slartus.boostbuddy.data.Inject.instance
 import ru.slartus.boostbuddy.data.analytic.AnalyticsTracker
 import ru.slartus.boostbuddy.data.analytic.CompositeAnalytics
 import ru.slartus.boostbuddy.data.analytic.LogAnalytics
 import ru.slartus.boostbuddy.data.api.BoostyApi
+import ru.slartus.boostbuddy.data.api.PhoneAuthApi
+import ru.slartus.boostbuddy.data.ktor.buildBoostyAuthHttpClient
 import ru.slartus.boostbuddy.data.ktor.buildBoostyHttpClient
 import ru.slartus.boostbuddy.data.ktor.buildGithubHttpClient
 import ru.slartus.boostbuddy.data.log.CompositeLogger
@@ -28,9 +32,11 @@ import ru.slartus.boostbuddy.data.repositories.BlogRepository
 import ru.slartus.boostbuddy.data.repositories.EventsRepository
 import ru.slartus.boostbuddy.data.repositories.FeedRepository
 import ru.slartus.boostbuddy.data.repositories.GithubRepository
+import ru.slartus.boostbuddy.data.repositories.PhoneAuthRepository
 import ru.slartus.boostbuddy.data.repositories.PostRepository
 import ru.slartus.boostbuddy.data.repositories.ProfileRepository
 import ru.slartus.boostbuddy.data.repositories.SettingsRepository
+import ru.slartus.boostbuddy.data.repositories.StreamRepository
 import ru.slartus.boostbuddy.data.repositories.SubscribesRepository
 import ru.slartus.boostbuddy.data.repositories.TagRepository
 import ru.slartus.boostbuddy.data.repositories.VideoRepository
@@ -40,12 +46,19 @@ import ru.slartus.boostbuddy.navigation.NavigationRouterImpl
 
 object PlatformDataConfiguration {
     private const val TAG_HTTP_CLIENT_BOOSTY = "boosty"
+    private const val TAG_HTTP_CLIENT_BOOSTY_AUTH = "boosty_auth"
     private const val TAG_HTTP_CLIENT_GITHUB = "github"
     fun createDependenciesTree(
         platformConfiguration: PlatformConfiguration,
         analyticsTrackers: List<AnalyticsTracker>
     ) {
         Inject.createDependenciesTree {
+            bindSingleton<Json> {
+                Json {
+                    ignoreUnknownKeys = true
+                    isLenient = true
+                }
+            }
             bindSingleton<Logger> { CompositeLogger(listOf(NapierProxy())) }
             bindSingleton<AnalyticsTracker> {
                 CompositeAnalytics(
@@ -67,6 +80,7 @@ object PlatformDataConfiguration {
             }
             bindSingleton { GlobalExceptionHandlersChain() }
             bindSingleton { platformConfiguration }
+            bindSingleton { AudioPlayerHolder(platformConfiguration = instance()) }
             bindSingleton { NavigationRouterImpl() }
             bindSingleton { Permissions(platformConfiguration = instance()) }
             bindSingleton { SettingsFactory(platformConfiguration = instance()).createDefault() }
@@ -76,13 +90,14 @@ object PlatformDataConfiguration {
         val bufferLoggingTracker = addBufferLoggingTracker(appSettings.debugLog)
         Inject.addConfig {
             bindSingleton { bufferLoggingTracker }
-            githubDependencies(appSettings.debugLog)
-            boostyDependencies(appSettings.debugLog)
+            val debugLog = appSettings.debugLog || platformConfiguration.isDebug
+            githubDependencies(debugLog)
+            boostyDependencies(debugLog)
         }
     }
 
     private fun getAppSettings(): AppSettings {
-        val settingsRepository = Inject.instance<SettingsRepository>()
+        val settingsRepository = instance<SettingsRepository>()
         return runBlocking { settingsRepository.getSettings() }
     }
 
@@ -93,7 +108,7 @@ object PlatformDataConfiguration {
     }
 
     private fun DI.MainBuilder.githubDependencies(debugLog: Boolean) {
-        bindSingleton(TAG_HTTP_CLIENT_GITHUB) { buildGithubHttpClient(debugLog) }
+        bindSingleton(TAG_HTTP_CLIENT_GITHUB) { buildGithubHttpClient(instance(), debugLog) }
         bindSingleton { GithubRepository(httpClient = instance(TAG_HTTP_CLIENT_GITHUB)) }
     }
 
@@ -101,7 +116,8 @@ object PlatformDataConfiguration {
         bindSingleton(TAG_HTTP_CLIENT_BOOSTY) {
             buildBoostyHttpClient(
                 debugLog = debugLog,
-                settingsRepository = instance()
+                settingsRepository = instance(),
+                json = instance(),
             )
         }
         bindSingleton { BoostyApi(httpClient = instance(TAG_HTTP_CLIENT_BOOSTY)) }
@@ -111,8 +127,14 @@ object PlatformDataConfiguration {
         bindSingleton { PostRepository(boostyApi = instance()) }
         bindSingleton { VideoRepository(boostyApi = instance()) }
         bindSingleton { ProfileRepository(boostyApi = instance()) }
+        bindSingleton(TAG_HTTP_CLIENT_BOOSTY_AUTH) {
+            buildBoostyAuthHttpClient(debugLog = debugLog, json = instance())
+        }
+        bindSingleton { PhoneAuthApi(httpClient = instance(TAG_HTTP_CLIENT_BOOSTY_AUTH)) }
+        bindSingleton { PhoneAuthRepository(phoneAuthApi = instance()) }
         bindSingleton { EventsRepository(boostyApi = instance()) }
         bindSingleton { FeedRepository(boostyApi = instance()) }
+        bindSingleton { StreamRepository(boostyApi = instance()) }
         bindProvider { new(::TagRepository) }
     }
 }

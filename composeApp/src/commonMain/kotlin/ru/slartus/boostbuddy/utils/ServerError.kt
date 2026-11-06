@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.utils
 
 import io.ktor.client.plugins.ResponseException
@@ -16,7 +17,7 @@ fun Throwable.toServerException(): ServerException =
 
             else -> ServerException.Request(
                 code = response.status,
-                message = message ?: response.status.description
+                message = response.status.description
             )
         }
 

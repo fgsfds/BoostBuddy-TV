@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 plugins {
     alias(libs.plugins.multiplatform)
     alias(libs.plugins.compose)
@@ -55,6 +56,7 @@ kotlin {
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.kotlinx.datetime)
             implementation(libs.kotlinx.io.core)
+            implementation(libs.kotlinx.atomicfu)
             implementation(libs.settings.core)
             implementation(libs.settings.coroutines)
             implementation(libs.kodein.core)
@@ -74,7 +76,6 @@ kotlin {
             implementation(libs.compose.uitooling)
             implementation(libs.kotlinx.coroutines.android)
             implementation(libs.ktor.okhttp)
-            implementation(libs.appmetrica)
 
             implementation(libs.exoplayer.core)
             implementation(libs.exoplayer.dash)
@@ -100,10 +101,32 @@ android {
         minSdk = 24
         targetSdk = 34
 
-        applicationId = "ru.slartus.boostbuddy"
-        versionCode = 76
-        versionName = "1.8.1"
+        applicationId = "ru.slartus.boostbuddy.tvfork"
+        versionCode = 89
+        versionName = "1.16.0-tv.1"
     }
+
+    // Release signing is optional and always supplied by the fork owner.
+    // Debug builds use Android's local debug certificate and need no release key.
+    val releaseKeyFile = providers.environmentVariable("BOOSTBUDDY_TV_KEYSTORE_FILE").orNull
+    val releaseStorePassword = providers.environmentVariable("BOOSTBUDDY_TV_STORE_PASSWORD").orNull
+    val releaseKeyAlias = providers.environmentVariable("BOOSTBUDDY_TV_KEY_ALIAS").orNull
+    val releaseKeyPassword = providers.environmentVariable("BOOSTBUDDY_TV_KEY_PASSWORD").orNull
+    if (listOf(releaseKeyFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword).all { !it.isNullOrBlank() }) {
+        signingConfigs.create("tvRelease") {
+            storeFile = file(requireNotNull(releaseKeyFile))
+            storePassword = releaseStorePassword
+            keyAlias = releaseKeyAlias
+            keyPassword = releaseKeyPassword
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.findByName("tvRelease")
+        }
+    }
+
     sourceSets["main"].apply {
         manifest.srcFile("src/androidMain/AndroidManifest.xml")
         res.srcDirs("src/androidMain/resources")

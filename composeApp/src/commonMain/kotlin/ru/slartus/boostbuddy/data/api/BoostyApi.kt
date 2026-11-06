@@ -1,3 +1,6 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
+@file:OptIn(ExperimentalTime::class)
+
 package ru.slartus.boostbuddy.data.api
 
 import io.ktor.client.HttpClient
@@ -18,6 +21,7 @@ import ru.slartus.boostbuddy.data.api.model.RemoteFeedResponse
 import ru.slartus.boostbuddy.data.api.model.RemoteFeedTagResponse
 import ru.slartus.boostbuddy.data.api.model.RemotePostResponse
 import ru.slartus.boostbuddy.data.api.model.RemoteSearchResponse
+import kotlin.time.ExperimentalTime
 
 internal class BoostyApi(
     private val httpClient: HttpClient
@@ -26,19 +30,24 @@ internal class BoostyApi(
     suspend fun refreshToken(deviceId: String, refreshToken: String): HttpResponse =
         httpClient
             .post("oauth/token/") {
-                setBody(FormDataContent(Parameters.build {
-                    append("device_id", deviceId)
-                    append("device_os", "android")
-                    append("grant_type", "refresh_token")
-                    append("refresh_token", refreshToken)
-                }))
-            }.body()
+                setBody(
+                    FormDataContent(
+                        Parameters.build {
+                            append("device_id", deviceId)
+                            append("device_os", "android")
+                            append("grant_type", "refresh_token")
+                            append("refresh_token", refreshToken)
+                        }
+                    )
+                )
+            }
 
-    suspend fun subscribes(limit: Int, withFollow: Boolean): HttpResponse =
+    suspend fun subscribes(limit: Int, withFollow: Boolean, offset: Int = 0): HttpResponse =
         httpClient
             .get("v1/user/subscriptions") {
                 parameter("limit", limit)
                 parameter("with_follow", withFollow)
+                parameter("offset", offset)
             }
 
     suspend fun current(): HttpResponse = httpClient.get("v1/user/current")
@@ -198,7 +207,7 @@ internal class BoostyApi(
     suspend fun putVideoTimeCode(
         videoId: String,
         timeCode: Long
-    ): HttpResponse = httpClient.put("v1/video/$videoId/timecode/") {
+    ): HttpResponse = httpClient.put("v1/viewstat/video/$videoId/timecode/") {
         setBody(FormDataContent(Parameters.build {
             append("time_code", timeCode.toString())
         }))
@@ -238,4 +247,23 @@ internal class BoostyApi(
     suspend fun blogTag(
         blog: String,
     ): RemoteBlogTagResponse = httpClient.get("v1/blog/$blog/post/tag/").body()
+
+    suspend fun videoStream(
+        blog: String,
+    ): HttpResponse = httpClient.get("v1/blog/$blog/video_stream")
+
+    suspend fun videoStreamHeartbeat(
+        blog: String,
+        stop: Boolean,
+    ): HttpResponse = httpClient.put("v1/blog/$blog/video_stream/heartbeat/viewer") {
+        if (stop) parameter("stop", true)
+    }
+
+    suspend fun videoStreamLike(
+        blog: String,
+    ): HttpResponse = httpClient.post("v1/blog/$blog/video_stream/like")
+
+    suspend fun videoStreamUnlike(
+        blog: String,
+    ): HttpResponse = httpClient.delete("v1/blog/$blog/video_stream/like")
 }

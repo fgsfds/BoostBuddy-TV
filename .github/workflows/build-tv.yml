@@ -1,0 +1,204 @@
+name: Build TV APK
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Keep each push's build when a branch receives a newer commit; only duplicate
+# runs for the same event, ref, and commit can cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  android-debug:
+    name: Debug APK and unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          java-version: '17'
+          distribution: temurin
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Set up Gradle and validate wrapper
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          cache-provider: basic
+          # Other branches and pull requests can reuse, but cannot replace, this cache.
+          cache-read-only: ${{ github.event_name == 'pull_request' || github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
+          validate-wrappers: true
+
+      - name: Build and test TV app
+        id: build
+        run: ./gradlew :composeApp:assembleDebug :composeApp:testDebugUnitTest --no-daemon --stacktrace --console=plain
+
+      - name: Package the validated APK
+        id: package
+        env:
+          SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+
+          apk_dir = Path("composeApp/build/outputs/apk/debug")
+          metadata = json.loads((apk_dir / "output-metadata.json").read_text())
+          outputs = metadata["elements"]
+          if len(outputs) != 1 or outputs[0].get("filters"):
+              raise SystemExit("Expected one universal debug APK; review packaging for APK splits.")
+          output = outputs[0]
+          source = apk_dir / output["outputFile"]
+          if source.suffix != ".apk" or not source.is_file():
+              raise SystemExit("The debug APK declared by Android build metadata is missing.")
+          version = re.sub(r"[^A-Za-z0-9._-]", "_", output["versionName"])
+          commit = os.environ["GITHUB_SHA"]
+          name = f"BoostBuddy-TV-{version}-c{output['versionCode']}-{commit[:12]}-debug"
+          artifact = f"{name}-run{os.environ['GITHUB_RUN_NUMBER']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          destination = Path("dist")
+          destination.mkdir(exist_ok=True)
+          apk = destination / f"{name}.apk"
+          shutil.copy2(source, apk)
+          checksum = hashlib.sha256(apk.read_bytes()).hexdigest()
+          (destination / "SHA256SUMS").write_text(f"{checksum}  {apk.name}\n")
+          run_url = (
+              f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
+              f"/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          )
+          info = {
+              "applicationId": metadata["applicationId"],
+              "versionName": output["versionName"],
+              "versionCode": output["versionCode"],
+              "builtCommit": commit,
+              "sourceCommit": os.environ["SOURCE_COMMIT"],
+              "ref": os.environ["GITHUB_REF"],
+              "event": os.environ["GITHUB_EVENT_NAME"],
+              "workflowRun": run_url,
+              "apk": apk.name,
+              "sha256": checksum,
+              "signing": "Ephemeral Android debug key generated on this CI runner",
+          }
+          (destination / "build-info.json").write_text(json.dumps(info, indent=2) + "\n")
+          (destination / "INSTALL.txt").write_text(
+              "Extract this archive and sideload the .apk onto your Android TV / Google TV.\n"
+              f"With Android platform-tools: adb install \"{apk.name}\"\n\n"
+              "Each fresh CI runner generates its own debug signing key. To install a later\n"
+              "CI build, you may need to uninstall the previous one first. Uninstalling\n"
+              "removes local app data, including sign-in and settings. For stable updates,\n"
+              "build and sign releases with your own persistent signing key.\n\n"
+              f"Source/build details: build-info.json\nWorkflow: {run_url}\n"
+          )
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as outputs_file:
+              outputs_file.write(f"artifact_name={artifact}\napk_name={apk.name}\n")
+              outputs_file.write(f"version={output['versionName']}\n")
+          PY
+
+      - name: Upload installable APK
+        id: apk
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload test and build reports
+        id: reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: TV-reports-${{ github.sha }}-run${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            composeApp/build/reports/
+            composeApp/build/test-results/testDebugUnitTest/
+            composeApp/build/outputs/logs/
+            build/reports/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Write download and test summary
+        if: always()
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          APK_URL: ${{ steps.apk.outputs.artifact-url }}
+          APK_NAME: ${{ steps.package.outputs.apk_name }}
+          REPORTS_URL: ${{ steps.reports.outputs.artifact-url }}
+        run: |
+          python3 <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          summary = [
+              "## BoostBuddy TV build",
+              "",
+              f"Commit built: `{os.environ['GITHUB_SHA']}`",
+              f"Build and unit-test step: **{os.environ.get('BUILD_OUTCOME') or 'not run'}**.",
+              "",
+          ]
+          suites = [
+              ET.parse(report).getroot()
+              for report in Path("composeApp/build/test-results/testDebugUnitTest").glob("TEST-*.xml")
+          ]
+          if suites:
+              counts = {
+                  key: sum(int(suite.get(key, "0")) for suite in suites)
+                  for key in ("tests", "failures", "errors", "skipped")
+              }
+              summary.append(
+                  f"Unit tests: **{counts['tests']}** total, {counts['failures']} failures, "
+                  f"{counts['errors']} errors, {counts['skipped']} skipped."
+              )
+          else:
+              summary.append("No completed unit-test report was available.")
+          summary.append("")
+          if os.environ.get("APK_URL"):
+              summary.extend([
+                  f"[Download APK artifact]({os.environ['APK_URL']})",
+                  f" — `{os.environ['APK_NAME']}`",
+                  "",
+                  "Sign in to GitHub, download the artifact ZIP, extract it, and sideload the APK.",
+                  "The ZIP includes SHA-256 checksums, build metadata, and installation notes.",
+                  "",
+                  "**Signing:** each fresh CI runner uses its own debug key. Installing a later "
+                  "CI build may require uninstalling the previous one, which removes local "
+                  "sign-in and settings. Use your own persistent release key for stable updates.",
+              ])
+          else:
+              summary.append("No validated APK was uploaded. Inspect the failed step and available reports.")
+          if os.environ.get("REPORTS_URL"):
+              summary.extend(["", f"[Download test and build reports]({os.environ['REPORTS_URL']})"])
+          summary.extend([
+              "",
+              "Artifacts are retained for **14 days**, subject to repository policy. "
+              "This workflow requires no signing secrets and does not publish GitHub releases.",
+              "",
+          ])
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary_file:
+              summary_file.write("\n".join(summary))
+          PY

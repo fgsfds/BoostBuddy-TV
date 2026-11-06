@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.ui.screens
 
 import androidx.compose.foundation.clickable
@@ -39,6 +40,8 @@ import ru.slartus.boostbuddy.components.RootComponent
 import ru.slartus.boostbuddy.components.RootViewAction
 import ru.slartus.boostbuddy.components.observeAction
 import ru.slartus.boostbuddy.components.settings.SettingsComponent
+import ru.slartus.boostbuddy.components.main.MainComponent
+import ru.slartus.boostbuddy.components.blog.BlogComponent
 import ru.slartus.boostbuddy.ui.common.QrDialog
 import ru.slartus.boostbuddy.ui.screens.blog.BlogScreen
 import ru.slartus.boostbuddy.ui.screens.blog.VideoTypeDialogView
@@ -50,12 +53,22 @@ import ru.slartus.boostbuddy.ui.theme.AppTheme
 
 
 @Composable
-fun RootScreen(component: RootComponent, modifier: Modifier = Modifier) {
+fun RootScreen(
+    component: RootComponent,
+    modifier: Modifier = Modifier,
+    preferDarkTheme: Boolean = false,
+    mainContent: @Composable (MainComponent) -> Unit = { MainScreen(it) },
+    blogContent: @Composable (BlogComponent, MainComponent?) -> Unit = { blog, _ -> BlogScreen(blog) },
+) {
     val state by component.viewStates.subscribeAsState()
+    val stackState by component.stack.subscribeAsState()
     val dialogSlot by component.dialogSlot.subscribeAsState()
     val snackState = remember { SnackbarHostState() }
+    val mainComponent = (stackState.backStack + stackState.active)
+        .mapNotNull { (it.instance as? RootComponent.Child.MainChild)?.component }
+        .firstOrNull()
 
-    AppTheme(state.appSettings.isDarkMode) {
+    AppTheme(state.appSettings.isDarkMode ?: if (preferDarkTheme) true else null) {
         WindowInsetsBox {
             Children(
                 stack = component.stack,
@@ -64,9 +77,9 @@ fun RootScreen(component: RootComponent, modifier: Modifier = Modifier) {
             ) {
                 when (val child = it.instance) {
                     is RootComponent.Child.AuthChild -> AuthScreen(child.component)
-                    is RootComponent.Child.MainChild -> MainScreen(child.component)
+                    is RootComponent.Child.MainChild -> mainContent(child.component)
                     is RootComponent.Child.SubscribesChild -> SubscribesScreen(child.component)
-                    is RootComponent.Child.BlogChild -> BlogScreen(child.component)
+                    is RootComponent.Child.BlogChild -> blogContent(child.component, mainComponent)
                     is RootComponent.Child.VideoChild -> VideoScreen(child.component)
                     is RootComponent.Child.PostChild -> PostScreen(child.component)
                 }

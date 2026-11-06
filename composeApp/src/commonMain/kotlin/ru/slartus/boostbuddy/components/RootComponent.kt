@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.components
 
 import androidx.compose.runtime.Stable
@@ -15,6 +16,7 @@ import com.arkivanov.decompose.router.stack.popWhile
 import com.arkivanov.decompose.router.stack.push
 import com.arkivanov.decompose.router.stack.pushToFront
 import com.arkivanov.decompose.router.stack.replaceAll
+import com.arkivanov.decompose.router.stack.replaceCurrent
 import com.arkivanov.decompose.value.Value
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
@@ -51,6 +53,7 @@ import ru.slartus.boostbuddy.data.repositories.Blog
 import ru.slartus.boostbuddy.data.repositories.GithubRepository
 import ru.slartus.boostbuddy.data.repositories.ReleaseInfo
 import ru.slartus.boostbuddy.data.repositories.SettingsRepository
+import ru.slartus.boostbuddy.components.video.pickPlayerUrl
 import ru.slartus.boostbuddy.data.repositories.models.Content
 import ru.slartus.boostbuddy.data.repositories.models.PlayerUrl
 import ru.slartus.boostbuddy.data.repositories.models.Post
@@ -132,6 +135,12 @@ class RootComponentImpl(
     private val permissions by Inject.lazy<Permissions>()
     private var fetchVersionJob: Job = Job()
 
+    // Лямбда не сериализуется и поэтому не лежит в DialogConfig.Filter. Живёт в памяти процесса:
+    // переживёт обычное конфиг-чейндж, но не process death. Если процесс пересоздался —
+    // dialogChild увидит null и сразу закроет диалог фильтра (см. dialogChild).
+    private var pendingFilterCallback: ((ru.slartus.boostbuddy.components.filter.Filter) -> Unit)? =
+        null
+
     override val dialogSlot: Value<ChildSlot<*, RootComponent.DialogChild>> =
         childSlot(
             key = "dialogSlot",
@@ -153,7 +162,8 @@ class RootComponentImpl(
 
     init {
         subscribeSettings()
-        fetchLastReleaseInfo()
+        // This fork has a distinct package/signature. Upstream APK updates are
+        // not updates for this application and must not be offered automatically.
         subscribeToRouter()
     }
 
@@ -180,14 +190,27 @@ class RootComponentImpl(
 
     private fun navigateToScreen(screen: Screen) {
         when (screen) {
-            is NavigationTree.Blog -> navigation.push(Config.BlogConfig(blog = screen.blog))
+            is NavigationTree.Blog -> {
+                val config = Config.BlogConfig(blog = screen.blog)
+                if (platformConfiguration.platform == Platform.AndroidTV &&
+                    stack.value.active.instance is RootComponent.Child.BlogChild
+                ) {
+                    navigation.replaceCurrent(config)
+                } else {
+                    navigation.push(config)
+                }
+            }
             is NavigationTree.BlogPost -> navigation.push(
                 Config.PostConfig(
                     post = screen.post
                 )
             )
 
-            NavigationTree.Main -> navigation.pushToFront(Config.Main)
+            NavigationTree.Main -> if (platformConfiguration.platform == Platform.AndroidTV) {
+                navigation.popWhile { it != Config.Main }
+            } else {
+                navigation.pushToFront(Config.Main)
+            }
             is NavigationTree.Video -> playVideo(
                 blogUrl = screen.blogUrl,
                 postId = screen.postId,
@@ -198,6 +221,7 @@ class RootComponentImpl(
             NavigationTree.AppSettings -> dialogNavigation.activate(
                 DialogConfig.AppSettings
             )
+            is NavigationTree.Message -> dialogNavigation.activate(DialogConfig.Error(screen.text))
 
             NavigationTree.Logout -> dialogNavigation.activate(DialogConfig.Logout)
             is NavigationTree.Qr -> dialogNavigation.activate(
@@ -207,17 +231,23 @@ class RootComponentImpl(
                 )
             )
 
-            is NavigationTree.VideoType -> dialogNavigation.activate(
-                DialogConfig.VideoType(
-                    blogUrl = screen.blogUrl,
-                    postId = screen.postId,
-                    postData = screen.postData
-                )
+            is NavigationTree.VideoType -> resolveVideoType(
+                blogUrl = screen.blogUrl,
+                postId = screen.postId,
+                postData = screen.postData
             )
 
-            is NavigationTree.Filter -> dialogNavigation.activate(
-                DialogConfig.Filter(screen.filter, screen.onFilter)
+            is NavigationTree.LiveStream -> resolveLiveStream(
+                blogUrl = screen.blogUrl,
+                streamId = screen.streamId,
+                postData = screen.postData,
+                startedAtSeconds = screen.startedAtSeconds,
             )
+
+            is NavigationTree.Filter -> {
+                pendingFilterCallback = screen.onFilter
+                dialogNavigation.activate(DialogConfig.Filter(screen.filter))
+            }
         }
     }
 
@@ -230,7 +260,6 @@ class RootComponentImpl(
                 val lastReleaseVersion = lastReleaseInfo.version
 
                 if (!lastReleaseVersion.greaterThan(platformConfiguration.appVersion)) {
-                    donateNotify()
                     return@launch
                 }
 
@@ -245,7 +274,7 @@ class RootComponentImpl(
     private suspend fun donateNotify() {
         val lastDonateNotifyVersion = settingsRepository.getLastDonateNotifyVersion()
         if (lastDonateNotifyVersion != null &&
-            !lastDonateNotifyVersion.greaterThan(platformConfiguration.appVersion)
+            !platformConfiguration.appVersion.greaterThan(lastDonateNotifyVersion)
         ) return
 
         analytics.trackEvent("root", mapOf("action" to "donate_info"))
@@ -263,8 +292,8 @@ class RootComponentImpl(
             } ?: return@launch
 
             viewAction = RootViewAction.ShowSnackBar("Загрузка файла началась")
-            val path = githubRepository.downloadFile(url).getOrThrow()
             runCatching {
+                val path = githubRepository.downloadFile(url).getOrThrow()
                 platformConfiguration.installApp(path)
             }.onFailure {
                 viewAction = RootViewAction.ShowSnackBar("Ошибка загрузки файла")
@@ -350,21 +379,30 @@ class RootComponentImpl(
                 )
             )
 
-            is DialogConfig.Filter -> RootComponent.DialogChild.Filter(
-                FilterComponentImpl(
-                    componentContext = componentContext,
-                    params = FilterParams(
-                        filter = config.filter,
-                        onFilter = config.onFilter,
-                        entryPoint = FilterScreenEntryPoint.Feed,
-                    ),
+            is DialogConfig.Filter -> {
+                val callback = pendingFilterCallback
+                if (callback == null) {
+                    // process death: лямбда потеряна, диалог без обратной связи бесполезен
+                    scope.launch { dialogNavigation.dismiss() }
+                }
+                RootComponent.DialogChild.Filter(
+                    FilterComponentImpl(
+                        componentContext = componentContext,
+                        params = FilterParams(
+                            filter = config.filter,
+                            onFilter = callback ?: {},
+                            entryPoint = FilterScreenEntryPoint.Feed,
+                        ),
+                    )
                 )
-            )
+            }
         }
 
     private fun logout() {
         scope.launch {
             settingsRepository.putAccessToken(null)
+            settingsRepository.putRefreshToken(null)
+            settingsRepository.putTokenExpiresAt(null)
             WebManager.clearWebViewCookies()
             WebManager.clearWebViewStorage()
             unauthorizedError()
@@ -373,7 +411,7 @@ class RootComponentImpl(
 
     private fun settingsComponent(componentContext: ComponentContext): SettingsComponent =
         SettingsComponentImpl(componentContext = componentContext, onVersionClickedHandler = {
-            fetchLastReleaseInfo()
+            viewAction = RootViewAction.ShowSnackBar("Install a newer BoostBuddy TV APK to update this build.")
         })
 
     private fun authComponent(componentContext: ComponentContext): AuthComponent =
@@ -412,6 +450,45 @@ class RootComponentImpl(
             onBackClicked = { navigation.popWhile { it == config } }
         )
 
+    private fun resolveVideoType(
+        blogUrl: String,
+        postId: String,
+        postData: Content.OkVideo,
+    ) {
+        scope.launch {
+            val settings = settingsRepository.getSettings()
+            if (settings.useSystemVideoPlayer) {
+                dialogNavigation.activate(
+                    DialogConfig.VideoType(
+                        blogUrl = blogUrl,
+                        postId = postId,
+                        postData = postData
+                    )
+                )
+                return@launch
+            }
+            val autoPick = postData.playerUrls.pickPlayerUrl(settings.preferredQuality)
+            if (autoPick != null) {
+                navigation.push(
+                    Config.VideoConfig(
+                        blogUrl = blogUrl,
+                        postId = postId,
+                        postData = postData,
+                        playerUrl = autoPick
+                    )
+                )
+            } else {
+                dialogNavigation.activate(
+                    DialogConfig.VideoType(
+                        blogUrl = blogUrl,
+                        postId = postId,
+                        postData = postData
+                    )
+                )
+            }
+        }
+    }
+
     private fun playVideo(
         blogUrl: String,
         postId: String,
@@ -442,6 +519,30 @@ class RootComponentImpl(
         }
     }
 
+    private fun resolveLiveStream(
+        blogUrl: String,
+        streamId: String,
+        postData: Content.OkVideo,
+        startedAtSeconds: Long?,
+    ) {
+        scope.launch {
+            val settings = settingsRepository.getSettings()
+            val playerUrl = postData.playerUrls.pickPlayerUrl(settings.preferredQuality)
+                ?: postData.playerUrls.firstOrNull()
+                ?: return@launch
+            navigation.push(
+                Config.VideoConfig(
+                    blogUrl = blogUrl,
+                    postId = streamId,
+                    postData = postData,
+                    playerUrl = playerUrl,
+                    liveBlogUrl = blogUrl,
+                    liveStartedAtSeconds = startedAtSeconds,
+                )
+            )
+        }
+    }
+
     private fun videoComponent(
         componentContext: ComponentContext,
         config: Config.VideoConfig
@@ -452,6 +553,8 @@ class RootComponentImpl(
             postId = config.postId,
             postData = config.postData,
             playerUrl = config.playerUrl,
+            liveBlogUrl = config.liveBlogUrl,
+            liveStartedAtSeconds = config.liveStartedAtSeconds,
             onStopClicked = { navigation.popWhile { it == config } }
         )
 
@@ -536,6 +639,8 @@ class RootComponentImpl(
             val postId: String,
             val postData: Content.OkVideo,
             val playerUrl: PlayerUrl,
+            val liveBlogUrl: String? = null,
+            val liveStartedAtSeconds: Long? = null,
             val id: String = Uuid.random().toString()
         ) : Config
 
@@ -571,9 +676,8 @@ class RootComponentImpl(
         ) : DialogConfig
 
         @Serializable
-        class Filter(
+        data class Filter(
             val filter: ru.slartus.boostbuddy.components.filter.Filter,
-            val onFilter: (filter: ru.slartus.boostbuddy.components.filter.Filter) -> Unit,
         ) : DialogConfig
     }
 }
