@@ -1,7 +1,9 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.components.tv
 
 import androidx.compose.runtime.Immutable
 import ru.slartus.boostbuddy.components.feed.FeedPostItem
+import ru.slartus.boostbuddy.components.video.usableOptions
 import ru.slartus.boostbuddy.data.repositories.models.Content
 import ru.slartus.boostbuddy.data.repositories.models.Post
 
@@ -18,7 +20,7 @@ data class TvVideoCard(
     val thumbnailUrl: String get() = video.previewUrl
     val durationSeconds: Long get() = video.durationSeconds.coerceAtLeast(0)
     val isPlayable: Boolean
-        get() = !isLocked && video.playerUrls.any { it.url.isNotBlank() }
+        get() = !isLocked && video.playerUrls.usableOptions().isNotEmpty()
     val progress: Float
         get() = if (durationSeconds > 0) {
             (video.timeCode.toDouble() / durationSeconds).coerceIn(0.0, 1.0).toFloat()

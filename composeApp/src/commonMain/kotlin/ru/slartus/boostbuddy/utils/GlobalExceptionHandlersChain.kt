@@ -1,28 +1,43 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.utils
 
-import kotlinx.datetime.Clock
-
+import kotlinx.atomicfu.atomic
+import kotlinx.atomicfu.update
 
 typealias GlobalExceptionHandler = (Throwable) -> Boolean
 
-class GlobalExceptionHandlersChain {
-    private val handlers: LinkedHashMap<Long, GlobalExceptionHandler> = LinkedHashMap()
+class GlobalExceptionHandlersChain(
+    registerPlatformHandler: (GlobalExceptionHandlersChain) -> Unit = ::registerGlobalExceptionHandler,
+) {
+    private data class RegisteredHandler(val id: Long, val handler: GlobalExceptionHandler)
+
+    private val nextHandlerId = atomic(0L)
+    private val handlers = atomic<List<RegisteredHandler>>(emptyList())
 
     init {
-        registerGlobalExceptionHandler(this)
+        registerPlatformHandler(this)
     }
 
     fun registerHandler(handler: GlobalExceptionHandler): Long {
-        val newHandlerId = Clock.System.now().epochSeconds
-        handlers[newHandlerId] = handler
+        // Activity recreation can register several handlers within one second.
+        // A timestamp used as an ID silently replaced the previous activity's handler.
+        val newHandlerId = nextHandlerId.incrementAndGet()
+        handlers.update { it + RegisteredHandler(newHandlerId, handler) }
         return newHandlerId
     }
 
     fun unregisterHandler(handlerId: Long): Boolean {
-        return handlers.remove(handlerId) != null
+        while (true) {
+            val current = handlers.value
+            val remaining = current.filterNot { it.id == handlerId }
+            if (remaining.size == current.size) return false
+            if (handlers.compareAndSet(current, remaining)) return true
+        }
     }
 
     operator fun invoke(error: Throwable): Boolean {
-        return handlers.entries.reversed().firstOrNull { it.value.invoke(error) } != null
+        // Read a snapshot: a handler may unregister itself during dispatch, and
+        // platform errors may arrive concurrently with activity destruction.
+        return handlers.value.asReversed().any { it.handler(error) }
     }
 }

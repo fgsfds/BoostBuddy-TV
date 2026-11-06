@@ -60,10 +60,14 @@ internal data class PhoneCodeChallengeInfo(
     val code: String,
     val sentTransport: String?,
     val expiresInSeconds: Long,
-)
+) {
+    override fun toString(): String = "PhoneCodeChallengeInfo(redacted)"
+}
 
 internal data class PhoneAuthTokens(
     val accessToken: String,
     val refreshToken: String,
     val expiresIn: Long,
-)
+) {
+    override fun toString(): String = "PhoneAuthTokens(redacted)"
+}

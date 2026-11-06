@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.utils
 
 import io.github.aakira.napier.Napier
@@ -84,7 +85,8 @@ object PlatformDataConfiguration {
             bindSingleton { NavigationRouterImpl() }
             bindSingleton { Permissions(platformConfiguration = instance()) }
             bindSingleton { SettingsFactory(platformConfiguration = instance()).createDefault() }
-            bindProvider { new(::SettingsRepository) }
+            // Session updates and token refreshes must share one lock/revision.
+            bindSingleton { new(::SettingsRepository) }
         }
         val appSettings = getAppSettings()
         val bufferLoggingTracker = addBufferLoggingTracker(appSettings.debugLog)
@@ -126,7 +128,12 @@ object PlatformDataConfiguration {
         bindSingleton { CommentsRepository(boostyApi = instance()) }
         bindSingleton { PostRepository(boostyApi = instance()) }
         bindSingleton { VideoRepository(boostyApi = instance()) }
-        bindSingleton { ProfileRepository(boostyApi = instance()) }
+        bindSingleton {
+            ProfileRepository(
+                boostyApi = instance(),
+                authHttpClient = instance(TAG_HTTP_CLIENT_BOOSTY_AUTH),
+            )
+        }
         bindSingleton(TAG_HTTP_CLIENT_BOOSTY_AUTH) {
             buildBoostyAuthHttpClient(debugLog = debugLog, json = instance())
         }

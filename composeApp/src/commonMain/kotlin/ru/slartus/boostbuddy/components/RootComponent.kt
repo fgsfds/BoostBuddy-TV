@@ -21,6 +21,8 @@ import com.arkivanov.decompose.value.Value
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import ru.slartus.boostbuddy.components.auth.AuthComponent
@@ -69,7 +71,6 @@ import ru.slartus.boostbuddy.utils.PlatformConfiguration
 import ru.slartus.boostbuddy.utils.VersionsComparer.greaterThan
 import ru.slartus.boostbuddy.utils.VideoPlayer
 import ru.slartus.boostbuddy.utils.WebManager
-import ru.slartus.boostbuddy.utils.unauthorizedError
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
@@ -155,13 +156,18 @@ class RootComponentImpl(
             key = "DefaultChildStack",
             source = navigation,
             serializer = Config.serializer(),
-            initialConfiguration = Config.Main,
+            initialConfiguration = if (settingsRepository.sessionSnapshot().isAuthenticated) {
+                Config.Main
+            } else {
+                Config.Auth
+            },
             handleBackButton = true,
             childFactory = ::child,
         )
 
     init {
         subscribeSettings()
+        subscribeToSession()
         // This fork has a distinct package/signature. Upstream APK updates are
         // not updates for this application and must not be offered automatically.
         subscribeToRouter()
@@ -172,6 +178,17 @@ class RootComponentImpl(
             settingsRepository.appSettingsFlow.collect {
                 viewState = viewState.copy(appSettings = it)
             }
+        }
+    }
+
+    private fun subscribeToSession() {
+        scope.launch {
+            settingsRepository.sessionFlow
+                .map { it.sessionId to it.isAuthenticated }
+                .distinctUntilChanged()
+                .collect { (_, authenticated) ->
+                    if (!authenticated) showAuthorizeComponent()
+                }
         }
     }
 
@@ -302,7 +319,12 @@ class RootComponentImpl(
     }
 
     override fun showAuthorizeComponent() {
-        navigation.replaceAll(Config.Auth)
+        // Dialogs have their own navigation slot and otherwise survive logout.
+        pendingFilterCallback = null
+        dialogNavigation.dismiss()
+        if (stack.value.active.configuration != Config.Auth) {
+            navigation.replaceAll(Config.Auth)
+        }
     }
 
     private fun child(config: Config, componentContext: ComponentContext): RootComponent.Child =
@@ -399,13 +421,12 @@ class RootComponentImpl(
         }
 
     private fun logout() {
+        dialogNavigation.dismiss()
         scope.launch {
-            settingsRepository.putAccessToken(null)
-            settingsRepository.putRefreshToken(null)
-            settingsRepository.putTokenExpiresAt(null)
+            settingsRepository.clearSession()
             WebManager.clearWebViewCookies()
             WebManager.clearWebViewStorage()
-            unauthorizedError()
+            showAuthorizeComponent()
         }
     }
 
@@ -455,8 +476,7 @@ class RootComponentImpl(
         postId: String,
         postData: Content.OkVideo,
     ) {
-        scope.launch {
-            val settings = settingsRepository.getSettings()
+        withCurrentScreenSettings { settings ->
             if (settings.useSystemVideoPlayer) {
                 dialogNavigation.activate(
                     DialogConfig.VideoType(
@@ -465,7 +485,7 @@ class RootComponentImpl(
                         postData = postData
                     )
                 )
-                return@launch
+                return@withCurrentScreenSettings
             }
             val autoPick = postData.playerUrls.pickPlayerUrl(settings.preferredQuality)
             if (autoPick != null) {
@@ -495,8 +515,7 @@ class RootComponentImpl(
         postData: Content.OkVideo,
         playerUrl: PlayerUrl
     ) {
-        scope.launch {
-            val settings = settingsRepository.getSettings()
+        withCurrentScreenSettings { settings ->
             if (settings.useSystemVideoPlayer) {
                 val player = VideoPlayer()
                 player.playUrl(
@@ -525,11 +544,9 @@ class RootComponentImpl(
         postData: Content.OkVideo,
         startedAtSeconds: Long?,
     ) {
-        scope.launch {
-            val settings = settingsRepository.getSettings()
+        withCurrentScreenSettings { settings ->
             val playerUrl = postData.playerUrls.pickPlayerUrl(settings.preferredQuality)
-                ?: postData.playerUrls.firstOrNull()
-                ?: return@launch
+                ?: return@withCurrentScreenSettings
             navigation.push(
                 Config.VideoConfig(
                     blogUrl = blogUrl,
@@ -540,6 +557,22 @@ class RootComponentImpl(
                     liveStartedAtSeconds = startedAtSeconds,
                 )
             )
+        }
+    }
+
+    private fun withCurrentScreenSettings(action: (AppSettings) -> Unit) {
+        val origin = stack.value.active.configuration
+        val session = settingsRepository.sessionSnapshot()
+        if (!session.isAuthenticated || origin == Config.Auth) return
+        scope.launch {
+            val settings = settingsRepository.getSettings()
+            // A delayed click must not reopen playback after Back/logout, or
+            // push a duplicate player after the first click already navigated.
+            if (stack.value.active.configuration == origin &&
+                settingsRepository.sessionSnapshot().sessionId == session.sessionId
+            ) {
+                action(settings)
+            }
         }
     }
 

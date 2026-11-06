@@ -13,9 +13,9 @@ Based on upstream tag **1.16.0**, commit **b9acb6c2cde4f37907e70bf166a2f27c7d57c
 | Remote control | D-pad focus highlights, Left to return to the sidebar, Right to enter content, Back to the sidebar before navigating back, and per-route scroll/focused-card restoration. |
 | Subscriptions | Loads returned subscription pages and deduplicates creators, rather than stopping at the first 30 rows. |
 | Feed/search | Existing BoostBuddy APIs connect to the new screens. Pagination continues past text-only pages; page failures offer retry. |
-| Native login | Editable country code and phone number, verification-code entry, resend cooldown, loading/error states, and an explicit website fallback. |
-| Playback | Reuses BoostBuddy's native Media3 player and existing quality/resume logic. HLS, DASH, and direct media requests use the same browser User-Agent as the API client. |
-| App identity | Separate package `ru.slartus.boostbuddy.tvfork`, label **BoostBuddy TV**, version **1.16.0-tv.1**, and a TV launcher banner. It can coexist with upstream BoostBuddy. |
+| Native login | Editable country code and phone number, verification-code entry, resend cooldown, profile-validation retry, loading/error states, and an explicit website fallback. |
+| Playback | BoostBuddy's native Media3 player with fresh URL resolution, quality selection, serialized progress saves, and lifecycle-aware position/play-state restoration. HLS, DASH, and direct media requests use the same browser User-Agent as the API client. |
+| App identity | Separate package `ru.slartus.boostbuddy.tvfork`, label **BoostBuddy TV**, version **1.16.0-tv.2** (code 90), and a TV launcher banner. It can coexist with upstream BoostBuddy. |
 
 The interface retains BoostBuddy's Russian UI language. The main sidebar labels are **Лента** (Feed), **Подписки** (Subscriptions), **Поиск** (Search), **Настройки** (Settings), and **Выйти** (Sign out).
 
@@ -61,6 +61,8 @@ For stable updates, build releases with your own persistent signing key. The rep
 1. Enter the country calling code and national phone number in separate fields. `+381` and `+7` are shortcuts; the country code remains editable.
 2. Choose **Получить код** and enter the code from Boosty's verification flow.
 3. After successful token and profile validation, the app opens the TV feed.
+
+If the code was accepted but a temporary network error prevents profile validation, **Повторить вход** retries that validation. You do not need to request another code for that retry. Candidate credentials remain in memory until validation succeeds or the sign-in attempt is discarded.
 
 Use a phone number already linked to your Boosty account. For accounts created through Google, email, or another provider, Boosty provides a phone-linking option in its website profile settings. See [Boosty's phone-linking guide](https://boosty.to/boosty/posts/e2ca36ab-73ac-44b9-9890-660f9ebd7c3c).
 
@@ -131,17 +133,21 @@ The fixture activity is included only in debug builds and has no launcher entry.
 | `composeApp/src/commonMain/kotlin/ru/slartus/boostbuddy/components/feed/PostsFeedComponent.kt` | Generation-aware refresh, pagination, and playback eligibility checks. |
 | `composeApp/src/androidMain/kotlin/ru/slartus/boostbuddy/ui/widgets/VideoPlayer.kt` | Existing Media3 player with consistent media request headers. |
 | `composeApp/src/androidDebug/` and `composeApp/src/debug/` | Offline screenshot activity and its debug-only manifest entry. |
-| `composeApp/src/commonTest/` | Phone, subscription-pagination, and TV video-card regression tests. |
+| `composeApp/src/commonMain/kotlin/ru/slartus/boostbuddy/data/ktor/SessionTokenManager.kt` | Shared refresh work with session/revision guards against logout and account-switch races. |
+| `composeApp/src/commonTest/` | Authentication, session storage/refresh, feeds, subscriptions, playback, focus/search, and exception-handler regression tests. |
+| `composeApp/src/androidUnitTest/` | Real loopback HTTPS certificate and hostname verification tests for the Android HTTP engine. |
 
 ## Privacy and update behavior
 
-This fork removes the AppMetrica tracker and SDK dependency, disables verbose HTTP/media logging, sanitizes API error logging, and disables Android backup of application data. Access and refresh tokens still use BoostBuddy's existing app-private settings storage; no remote credential service is introduced.
+This fork removes the AppMetrica tracker and SDK dependency, disables verbose HTTP/media logging, sanitizes API error logging, and disables Android backup of application data. Access/refresh tokens and expiry use one app-private settings record, with migration from the previous separate fields. Shared refresh work cannot restore a signed-out session or overwrite a newer account. No remote credential service is introduced.
+
+Debug and release HTTP clients use normal certificate and hostname checks. Website login cancels certificate errors, restricts auth-cookie capture to the official HTTPS website origins, and excludes JavaScript console output and token-bearing page-error URLs from logs. The API client sends stored Bearer credentials only to the exact HTTPS Boosty API origin and does not follow redirects.
 
 The fork does not check for or offer upstream BoostBuddy APK updates. Install a newer fork APK explicitly. Existing user-selected log collection remains available, but the modified network/media logging paths do not deliberately record HTTP bodies, verification codes, or signed playback URLs.
 
 ## Validation and current limits
 
-[VALIDATION_TV.md](VALIDATION_TV.md) records the fresh local APK, **18 passing unit tests**, emulator rendering, and the D-pad navigation checks. An earlier APK containing stale compiled classes was superseded by the clean build described there.
+[VALIDATION_TV.md](VALIDATION_TV.md) records the fresh local APK, **84 passing automated tests**, emulator rendering, and D-pad navigation checks. [The code review](docs/CODE_REVIEW_TV.md) describes the issues corrected in `1.16.0-tv.2`; [AGENTS.md](AGENTS.md) records the implementation rules and verification workflow for future changes.
 
 - Boosty's unofficial API can change. A paid video requires the appropriate account entitlement.
 - The new grid targets native Boosty video attachments. Text/image posts do not become cards. External embedded players and a dedicated livestream directory are outside this first TV grid implementation.

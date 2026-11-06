@@ -116,6 +116,15 @@ internal fun AuthScreen(component: AuthComponent) {
                 },
                 actions = {
                     if (state.mode == AuthViewState.Mode.WebView) {
+                        if (state.canRetryLogin) {
+                            AuthActionButton(
+                                label = "Повторить вход",
+                                onClick = component::onRetryLoginClick,
+                                enabled = !state.isLoading,
+                                primary = true,
+                                modifier = Modifier.padding(end = 12.dp),
+                            )
+                        }
                         AuthActionButton(
                             label = "Вход по телефону",
                             onClick = component::onSwitchToPhoneLoginClick,
@@ -162,7 +171,7 @@ internal fun AuthScreen(component: AuthComponent) {
         val focusRequester = remember { FocusRequester() }
         val coroutineScope = rememberCoroutineScope()
 
-        LaunchedEffect(isKeyboardOpen) {
+        LaunchedEffect(isKeyboardOpen, useCursor) {
             if (useCursor) {
                 if (isKeyboardOpen)
                     focusRequester.freeFocus()
@@ -176,8 +185,8 @@ internal fun AuthScreen(component: AuthComponent) {
                 .then(
                     if (!useCursor) Modifier
                     else Modifier
-                        .focusable()
                         .focusRequester(focusRequester)
+                        .focusable()
                         .onPreviewKeyEvent { keyEvent ->
                             if (isKeyboardOpen) return@onPreviewKeyEvent false
                             if (!isOwnKeyCode(keyEvent)) return@onPreviewKeyEvent false
@@ -269,8 +278,8 @@ internal fun AuthScreen(component: AuthComponent) {
                     contentDescription = "Обновить"
                 )
         }
-        InfoDialogView()
     }
+    AuthErrorDialog(state.errorMessage, component::onDismissError)
 }
 
 @Composable
@@ -308,23 +317,26 @@ private fun PhoneAuthContent(
             }
         }
     }
-    state.errorMessage?.let { message ->
-        val errorFocus = remember { FocusRequester() }
-        AlertDialog(
-            onDismissRequest = component::onDismissError,
-            title = { Text("Не удалось продолжить") },
-            text = { Text(message, style = MaterialTheme.typography.bodyLarge) },
-            confirmButton = {
-                AuthActionButton(
-                    label = "Понятно",
-                    onClick = component::onDismissError,
-                    primary = true,
-                    modifier = Modifier.focusRequester(errorFocus),
-                )
-                LaunchedEffect(message) { errorFocus.requestFocus() }
-            },
-        )
-    }
+}
+
+@Composable
+private fun AuthErrorDialog(message: String?, onDismiss: () -> Unit) {
+    if (message == null) return
+    val errorFocus = remember { FocusRequester() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Не удалось продолжить") },
+        text = { Text(message, style = MaterialTheme.typography.bodyLarge) },
+        confirmButton = {
+            AuthActionButton(
+                label = "Понятно",
+                onClick = onDismiss,
+                primary = true,
+                modifier = Modifier.focusRequester(errorFocus),
+            )
+            LaunchedEffect(message) { errorFocus.requestFocus() }
+        },
+    )
 }
 
 @Composable
@@ -370,10 +382,12 @@ private fun PhoneAuthForm(
             if (value > 0) delay(1000)
         } while (value > 0)
     }
-    LaunchedEffect(state.mode) {
+    LaunchedEffect(state.mode, state.isLoading) {
+        if (state.isLoading) return@LaunchedEffect
         when (state.mode) {
             AuthViewState.Mode.EnterPhone -> phoneFocus.requestFocus()
             AuthViewState.Mode.EnterSmsCode -> codeFocus.requestFocus()
+            AuthViewState.Mode.CompleteLogin -> submitFocus.requestFocus()
             AuthViewState.Mode.WebView -> Unit
         }
     }
@@ -506,6 +520,27 @@ private fun PhoneAuthForm(
                         )
                     }
                 }
+                AuthViewState.Mode.CompleteLogin -> {
+                    Text("Код принят", style = MaterialTheme.typography.headlineSmall)
+                    Text(
+                        "Проверяем аккаунт Boosty. Если соединение прервалось, повторите вход — новый код не нужен.",
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    AuthActionButton(
+                        label = if (state.isLoading) "Проверяем аккаунт…" else "Повторить вход",
+                        onClick = component::onRetryLoginClick,
+                        enabled = !state.isLoading && state.canRetryLogin,
+                        primary = true,
+                        loading = state.isLoading,
+                        modifier = Modifier.fillMaxWidth().focusRequester(submitFocus),
+                    )
+                    AuthActionButton(
+                        label = "Изменить номер",
+                        onClick = component::onBackToPhoneClick,
+                        enabled = !state.isLoading,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 AuthViewState.Mode.WebView -> Unit
             }
             AuthActionButton(
@@ -579,33 +614,6 @@ private fun Modifier.tvAuthFieldNavigation(isKeyboardOpen: Boolean): Modifier {
         } ?: return@onPreviewKeyEvent false
         if (event.type == KeyEventType.KeyDown) focusManager.moveFocus(direction)
         true
-    }
-}
-
-@Composable
-private fun InfoDialogView() {
-    var isDialogOpen by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        delay(2000)
-        isDialogOpen = true
-    }
-    if (isDialogOpen) {
-        AlertDialog(
-            onDismissRequest = {
-                isDialogOpen = false
-            },
-            confirmButton = {
-                Button(onClick = {
-                    isDialogOpen = false
-                }) {
-                    Text("ОК")
-                }
-            },
-            title = { Text("Внимание") },
-            text = {
-                Text("Необходимо принять соглашение по использованию cookies и залогиниться.\n\nКлиент использует полученный в cookie токен.")
-            },
-        )
     }
 }
 

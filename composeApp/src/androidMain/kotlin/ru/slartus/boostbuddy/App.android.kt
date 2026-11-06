@@ -9,12 +9,16 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.arkivanov.decompose.defaultComponentContext
+import com.arkivanov.decompose.extensions.compose.subscribeAsState
+import kotlinx.coroutines.launch
 import ru.slartus.boostbuddy.components.RootComponentImpl
+import ru.slartus.boostbuddy.components.RootComponent
 import ru.slartus.boostbuddy.data.Inject
 import ru.slartus.boostbuddy.data.analytic.analytics
 import ru.slartus.boostbuddy.data.log.debugLogBuild
@@ -60,24 +64,30 @@ class AppActivity : BaseComponentActivity()
 class TvAppActivity : BaseComponentActivity()
 
 open class BaseComponentActivity : ComponentActivity() {
+    private val exceptionHandlers by lazy { Inject.instance<GlobalExceptionHandlersChain>() }
+    private var exceptionHandlerId: Long? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         installSplashScreen()
         super.onCreate(savedInstanceState)
 
         val root = RootComponentImpl(componentContext = defaultComponentContext())
 
-        Inject.instance<GlobalExceptionHandlersChain>().registerHandler { error ->
+        exceptionHandlerId = exceptionHandlers.registerHandler { error ->
+            if (isFinishing || isDestroyed) return@registerHandler false
             when (error) {
                 is UnauthorizedException -> {
-                    root.showAuthorizeComponent()
+                    root.scope.launch { root.showAuthorizeComponent() }
                     true
                 }
 
-                else -> {
+                is Exception -> {
                     analytics.reportUnhandledException(error)
-                    root.onErrorReceived(error)
+                    root.scope.launch { root.onErrorReceived(error) }
                     true
                 }
+
+                else -> false
             }
         }
         setContent {
@@ -91,6 +101,11 @@ open class BaseComponentActivity : ComponentActivity() {
                 val configuration = LocalPlatformConfiguration.current
                 if (configuration.platform == Platform.AndroidTV || this@BaseComponentActivity is TvAppActivity) {
                     val browseState = rememberTvBrowseState()
+                    val stack by root.stack.subscribeAsState()
+                    val isSigningIn = stack.active.instance is RootComponent.Child.AuthChild
+                    LaunchedEffect(isSigningIn) {
+                        if (isSigningIn) browseState.clear()
+                    }
                     RootScreen(
                         component = root,
                         modifier = Modifier.fillMaxSize(),
@@ -103,5 +118,11 @@ open class BaseComponentActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        exceptionHandlerId?.let(exceptionHandlers::unregisterHandler)
+        exceptionHandlerId = null
+        super.onDestroy()
     }
 }

@@ -8,6 +8,9 @@ import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import ru.slartus.boostbuddy.components.video.usableOptions
 import ru.slartus.boostbuddy.components.BaseComponent
 import ru.slartus.boostbuddy.components.common.ProgressState
 import ru.slartus.boostbuddy.data.Inject
@@ -25,7 +28,6 @@ import ru.slartus.boostbuddy.navigation.NavigationRouter
 import ru.slartus.boostbuddy.navigation.NavigationTree
 import ru.slartus.boostbuddy.navigation.navigateTo
 import ru.slartus.boostbuddy.utils.messageOrThrow
-import ru.slartus.boostbuddy.utils.unauthorizedError
 
 @Immutable
 sealed class FeedPostItem(val key: String, val contentType: String) {
@@ -41,13 +43,14 @@ abstract class PostsFeedComponent<State : Any, Action>(
     componentContext,
     initState
 ) {
-    private val navigationRouter by Inject.lazy<NavigationRouter>()
-    private val settingsRepository by Inject.lazy<SettingsRepository>()
-    private val postRepository by Inject.lazy<PostRepository>()
+    // Resolve the container only when a dependency is used. Feed loading can be
+    // exercised independently without creating or replacing global app DI.
+    private val navigationRouter by lazy { Inject.instance<NavigationRouter>() }
+    private val settingsRepository by lazy { Inject.instance<SettingsRepository>() }
+    private val postRepository by lazy { Inject.instance<PostRepository>() }
 
     private var fetchJob: Job? = null
     private var fetchGeneration = 0L
-    private var hadToken = false
     private val successfulCursors = mutableSetOf<String>()
 
     protected abstract val extra: Extra?
@@ -55,29 +58,33 @@ abstract class PostsFeedComponent<State : Any, Action>(
 
     protected fun subscribeToken() {
         scope.launch {
-            settingsRepository.tokenFlow.collect { token ->
-                tokenChanged(token)
-            }
+            settingsRepository.sessionFlow
+                .map { it.sessionId to it.isAuthenticated }
+                .distinctUntilChanged()
+                .collect { (sessionId, authenticated) -> sessionChanged(sessionId, authenticated) }
         }
     }
 
-    protected open fun tokenChanged(token: String?) {
-        if (token != null) {
-            // A token refresh can finish inside the current HTTP request. Do not
-            // cancel that request when its newly issued token is stored.
-            if (!hadToken) {
-                hadToken = true
-                fetchData()
-            }
-        } else {
-            hadToken = false
-            fetchGeneration++
-            fetchJob?.cancel()
-            successfulCursors.clear()
-            onNewItems(emptyList<FeedPostItem>().toImmutableList())
-            onIsRefreshingChanged(false)
-            onProgressStateChanged(ProgressState.Init)
-        }
+    protected open fun sessionChanged(sessionId: Long, authenticated: Boolean) {
+        clearFeed()
+        if (authenticated) fetchData()
+    }
+
+    // Read the atomic snapshot as well as observing it: a logout can happen before
+    // its flow collector gets a turn to cancel an in-flight request.
+    protected open fun authenticatedSessionId(): Long? = settingsRepository.sessionSnapshot()
+        .takeIf { it.isAuthenticated }?.sessionId
+
+    protected fun isCurrentSession(sessionId: Long?): Boolean =
+        sessionId != null && authenticatedSessionId() == sessionId
+
+    private fun clearFeed() {
+        fetchGeneration++
+        fetchJob?.cancel()
+        successfulCursors.clear()
+        onNewItems(emptyList<FeedPostItem>().toImmutableList())
+        onIsRefreshingChanged(false)
+        onProgressStateChanged(ProgressState.Init)
     }
 
     protected abstract suspend fun fetch(offset: String?): Result<Posts>
@@ -92,19 +99,20 @@ abstract class PostsFeedComponent<State : Any, Action>(
     protected open fun onIsRefreshingChanged(isRefreshing: Boolean) = Unit
 
     private fun fetchData(isRefresh: Boolean = false) {
+        val sessionId = authenticatedSessionId() ?: return clearFeed()
         val generation = ++fetchGeneration
         fetchJob?.cancel()
         successfulCursors.clear()
+        // A cursor belongs to one search/filter snapshot. A failed refresh must
+        // never continue paging the previous query or leave its footer visible.
+        onNewItems(viewStateItems.filterIsInstance<FeedPostItem.PostItem>().toImmutableList())
         onIsRefreshingChanged(isRefresh)
         onProgressStateChanged(ProgressState.Loading)
         fetchJob = scope.launch {
             try {
-                settingsRepository.getAccessToken() ?: unauthorizedError()
-                coroutineContext.ensureActive()
-                if (generation != fetchGeneration) return@launch
                 val response = fetch(null)
                 coroutineContext.ensureActive()
-                if (generation != fetchGeneration) return@launch
+                if (generation != fetchGeneration || !isCurrentSession(sessionId)) return@launch
                 if (response.isSuccess) {
                     val data = response.getOrNull()
                     val newItems = data?.items.orEmpty()
@@ -126,13 +134,14 @@ abstract class PostsFeedComponent<State : Any, Action>(
 
     private fun fetchData(offset: String) {
         if (fetchJob?.isActive == true) return
+        val sessionId = authenticatedSessionId() ?: return clearFeed()
         val generation = fetchGeneration
         val previousExtra = extra
         onNewItems(viewStateItems.plusItem(FeedPostItem.LoadingItem), previousExtra)
         fetchJob = scope.launch {
             val response = fetch(offset)
             coroutineContext.ensureActive()
-            if (generation != fetchGeneration) return@launch
+            if (generation != fetchGeneration || !isCurrentSession(sessionId)) return@launch
             if (response.isSuccess) {
                 val data = response.getOrNull()
                 successfulCursors.add(offset)
@@ -158,13 +167,8 @@ abstract class PostsFeedComponent<State : Any, Action>(
 
     protected fun fetchNext() {
         if (fetchJob?.isActive == true) return
-        val generation = fetchGeneration
-        scope.launch {
-            settingsRepository.getAccessToken() ?: unauthorizedError()
-            if (generation != fetchGeneration) return@launch
-            val page = extra?.takeUnless { it.isLast } ?: return@launch
-            fetchData(page.offset)
-        }
+        val page = extra?.takeUnless { it.isLast } ?: return
+        fetchData(page.offset)
     }
 
     fun onVideoItemClicked(post: Post, postData: Content.OkVideo) {
@@ -172,7 +176,7 @@ abstract class PostsFeedComponent<State : Any, Action>(
             navigationRouter.navigateTo(NavigationTree.Message("Your account does not have access to this post."))
             return
         }
-        if (postData.playerUrls.none { it.url.isNotBlank() }) {
+        if (postData.playerUrls.usableOptions().isEmpty()) {
             navigationRouter.navigateTo(NavigationTree.Message("This video is not ready to play. Refresh the feed and try again later."))
             return
         }
@@ -201,16 +205,21 @@ abstract class PostsFeedComponent<State : Any, Action>(
         navigationRouter.navigateTo(NavigationTree.BlogPost(post))
     }
 
-    private suspend fun refreshPoll(post: Post, pollId: Int) {
+    private suspend fun refreshPoll(post: Post, pollId: Int, generation: Long, sessionId: Long?) {
+        if (generation != fetchGeneration || !isCurrentSession(sessionId)) return
         val pollResponse = postRepository.getPoll(post.user.blogUrl, pollId)
-        if (pollResponse.isSuccess) {
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+        if (pollResponse.isSuccess && generation == fetchGeneration && isCurrentSession(sessionId)) {
             val updatedPoll = pollResponse.getOrThrow()
             replacePoll(updatedPoll)
         }
     }
 
     fun onPollOptionClicked(post: Post, poll: Poll, pollOption: PollOption) {
+        val generation = fetchGeneration
+        val sessionId = authenticatedSessionId()
         scope.launch {
+            if (generation != fetchGeneration || !isCurrentSession(sessionId)) return@launch
             if (poll.isMultiple) {
                 val newPoll = if (pollOption.id in poll.checked)
                     poll.copy(checked = poll.checked - pollOption.id)
@@ -223,24 +232,30 @@ abstract class PostsFeedComponent<State : Any, Action>(
                 else
                     postRepository.pollVote(poll.id, listOf(pollOption.id))
 
-                refreshPoll(post, poll.id)
+                refreshPoll(post, poll.id, generation, sessionId)
             }
         }
     }
 
     fun onVoteClicked(post: Post, poll: Poll) {
+        val generation = fetchGeneration
+        val sessionId = authenticatedSessionId()
         scope.launch {
+            if (generation != fetchGeneration || !isCurrentSession(sessionId)) return@launch
             postRepository.pollVote(poll.id, poll.checked.toList())
 
-            refreshPoll(post, poll.id)
+            refreshPoll(post, poll.id, generation, sessionId)
         }
     }
 
     fun onDeleteVoteClicked(post: Post, poll: Poll) {
+        val generation = fetchGeneration
+        val sessionId = authenticatedSessionId()
         scope.launch {
+            if (generation != fetchGeneration || !isCurrentSession(sessionId)) return@launch
             postRepository.deletePollVote(poll.id)
 
-            refreshPoll(post, poll.id)
+            refreshPoll(post, poll.id, generation, sessionId)
         }
     }
 
@@ -264,7 +279,7 @@ abstract class PostsFeedComponent<State : Any, Action>(
             if (item is FeedPostItem.PostItem && item.post.poll?.id == newPoll.id)
                 item.copy(post = item.post.copy(poll = newPoll))
             else item
-        }.toImmutableList())
+        }.toImmutableList(), extra)
     }
 
     companion object {

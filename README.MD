@@ -4,7 +4,7 @@ A native Boosty client for **Google TV and Android TV**, built around a remote: 
 
 [![Build TV APK](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml/badge.svg)](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml)
 
-[**Download an APK**](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml) · [Installation and build guide](README_TV.md) · [Validation](VALIDATION_TV.md)
+[**Download an APK**](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml) · [Installation and build guide](README_TV.md) · [Validation](VALIDATION_TV.md) · [Code review](docs/CODE_REVIEW_TV.md)
 
 An independent fork of [slartus/BoostBuddy](https://github.com/slartus/BoostBuddy), based on version **1.16.0**. This is an unofficial client; watching paid content requires access through your own Boosty account.
 
@@ -18,6 +18,10 @@ An independent fork of [slartus/BoostBuddy](https://github.com/slartus/BoostBudd
 - **Separate installation:** the `ru.slartus.boostbuddy.tvfork` package can coexist with upstream BoostBuddy. Android **7.0 / API 24** or newer is required.
 
 The interface is currently in Russian. **Лента** = Feed, **Подписки** = Subscriptions, **Поиск** = Search, **Настройки** = Settings.
+
+### Latest improvements — 1.16.0-tv.2
+
+The [code review](docs/CODE_REVIEW_TV.md) fixed inherited HTTPS-verification bypasses, session-refresh races, login retry after a temporary profile error, stale feed pagination, lost playback progress, and TV focus/search restoration. Credentials are validated before sign-in becomes active; logging out invalidates pending account requests. Playback now releases resources directly when the activity stops and retains its position and play/pause state for return.
 
 ## Screenshots
 
@@ -66,11 +70,11 @@ With **JDK 17**, Android SDK **35**, and Build Tools **35.x** configured:
 ./gradlew :composeApp:assembleDebug :composeApp:testDebugUnitTest
 ```
 
-The APK is written to `composeApp/build/outputs/apk/debug/composeApp-debug.apk`. Use `gradlew.bat` on Windows. See [README_TV.md](README_TV.md) for SDK setup, signing, installation, and the implementation map.
+The APK is written to `composeApp/build/outputs/apk/debug/composeApp-debug.apk`. Use `gradlew.bat` on Windows. See [README_TV.md](README_TV.md) for SDK setup, signing, installation, and the implementation map. [AGENTS.md](AGENTS.md) documents the repository workflow and implementation rules for coding agents.
 
 ## Validation and limits
 
-The clean local build passed **18 unit tests**. On an Android TV 10 emulator, the native login screen and offline browsing screens rendered successfully; D-pad movement between video cards, back to the sidebar, and into Subscriptions was checked. [Full validation record](VALIDATION_TV.md).
+The clean local build passed **84 automated tests**, including real loopback HTTPS checks and regressions for authentication, session races, paging, playback state, and TV focus. On an Android TV 10 emulator, the native login screen and offline browsing screens rendered successfully; remote navigation between cards, the sidebar, Subscriptions, and the search field was checked. [Full validation record](VALIDATION_TV.md).
 
 **Live account sign-in, code delivery, token renewal against Boosty, and video playback have not been tested.** The screenshots demonstrate rendering and navigation with an empty login form or offline fixtures. Hardware playback and account access still need a device/account smoke test.
 

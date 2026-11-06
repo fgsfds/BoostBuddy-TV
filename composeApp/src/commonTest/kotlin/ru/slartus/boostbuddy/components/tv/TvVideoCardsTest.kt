@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.components.tv
 
 import kotlin.test.Test
@@ -50,6 +51,19 @@ class TvVideoCardsTest {
         val card = videoCardsFromPosts(listOf(FeedPostItem.PostItem(post("one", listOf(content))))).single()
         assertFalse(card.isLocked)
         assertFalse(card.isPlayable)
+    }
+
+    @Test
+    fun cardAvailabilityMatchesThePlayersSupportedNonblankSources() {
+        val content = video("formats").copy(playerUrls = listOf(
+            PlayerUrl(VideoQuality.MP4, "https://example.com/unsupported.mp4"),
+            PlayerUrl(VideoQuality.HLS, "  "),
+        ))
+        val card = TvVideoCard(post("one", listOf(content)), content, false)
+        assertFalse(card.isPlayable)
+        assertTrue(card.copy(video = content.copy(playerUrls = content.playerUrls +
+            PlayerUrl(VideoQuality.HLS, "https://example.com/playable.m3u8")
+        )).isPlayable)
     }
 
     @Test

@@ -1,11 +1,16 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.components.video
 
 import androidx.compose.runtime.Stable
 import com.arkivanov.decompose.ComponentContext
 import com.arkivanov.decompose.value.Value
 import com.arkivanov.essenty.lifecycle.doOnDestroy
+import com.arkivanov.essenty.lifecycle.doOnStart
+import com.arkivanov.essenty.lifecycle.doOnStop
+import com.arkivanov.essenty.lifecycle.Lifecycle
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -53,7 +58,7 @@ data class VideoViewState(
     val retryToken: Int = 0,
 )
 
-val Content.OkVideo.timeCodeMs: Long get() = timeCode * 1000
+val Content.OkVideo.timeCodeMs: Long get() = timeCode.coerceIn(0L, Long.MAX_VALUE / 1000L) * 1000L
 
 enum class VideoState {
     Idle, Buffering, Ready, Ended, Error
@@ -83,39 +88,67 @@ internal class VideoComponentImpl(
     private val streamRepository by Inject.lazy<StreamRepository>()
     private val settingsRepository by Inject.lazy<SettingsRepository>()
     private val platformConfiguration by Inject.lazy<PlatformConfiguration>()
+    private val playbackSessionId = settingsRepository.sessionSnapshot()
+        .takeIf { it.isAuthenticated }?.sessionId
+    private val videoId = postData.id
     private val timeCodeManager = TimeCodeManager(
         scope = scope,
-        videoRepository = videoRepository,
+        saveTimeCode = { id, seconds ->
+            if (isPlaybackSessionActive()) videoRepository.putTimeCode(id, seconds)
+            else Result.failure(IllegalStateException("Playback session ended"))
+        },
     )
     private val liveStreamModel: LiveStreamComponentModel? = liveBlogUrl?.let { url ->
         LiveStreamComponentModel(
             scope = scope,
             streamRepository = streamRepository,
             blogUrl = url,
+            isSessionActive = ::isPlaybackSessionActive,
         )
     }
     private var bufferingDebounceJob: Job? = null
     private var autoRecoveryAttempted = false
     private var recoverJob: Job? = null
+    private var playbackGeneration = 0L
+    private var stopping = false
+    private var lastPlaybackPosition: Long? = null
 
     init {
-        if (liveStreamModel != null) {
-            viewState = viewState.copy(
-                postData = postData,
-                postTitle = postData.title,
-                loading = false,
-            )
-            timeCodeManager.setContentId(postData.id)
-            liveStreamModel.startHeartbeat()
-            lifecycle.doOnDestroy { liveStreamModel.stopHeartbeat() }
-        } else {
-            refreshData(
-                blogUrl = blogUrl,
-                postId = postId,
-                postData = postData
-            )
+        lifecycle.doOnStart {
+            if (viewState.postData != null && !viewState.streamEnded && !stopping) {
+                liveStreamModel?.startHeartbeat()
+            }
         }
+        lifecycle.doOnStop {
+            liveStreamModel?.stopHeartbeat()
+            if (liveStreamModel == null) timeCodeManager.putLastPosition()
+        }
+        lifecycle.doOnDestroy {
+            stopping = true
+            if (liveStreamModel != null) liveStreamModel.stopHeartbeat()
+            else timeCodeManager.putLastPosition()
+        }
+        scope.launch {
+            settingsRepository.sessionFlow
+                .map { it.sessionId to it.isAuthenticated }
+                .distinctUntilChanged()
+                .collect {
+                    if (!isPlaybackSessionActive()) {
+                        playbackGeneration++
+                        recoverJob?.cancel()
+                        cancelLoadingDebounce()
+                        liveStreamModel?.stopHeartbeat()
+                        viewState = viewState.copy(postData = null, loading = false, playbackError = true)
+                    }
+                }
+        }
+        refreshPlayback()
         subscribePlaybackSpeed()
+    }
+
+    private fun isPlaybackSessionActive(): Boolean {
+        val session = settingsRepository.sessionSnapshot()
+        return playbackSessionId != null && session.isAuthenticated && session.sessionId == playbackSessionId
     }
 
     private fun subscribePlaybackSpeed() {
@@ -124,25 +157,14 @@ internal class VideoComponentImpl(
                 .map { it.preferredPlaybackSpeed }
                 .distinctUntilChanged()
                 .collect { speed ->
-                    viewState = viewState.copy(playbackSpeed = speed)
-                    enforceLiveSpeed()
+                    // Live playback is always 1x, without erasing the saved VOD preference.
+                    viewState = viewState.copy(playbackSpeed = if (liveStreamModel != null) 1f else speed)
                 }
         }
     }
 
-    // Live-стрим всегда играет на 1x. Sync state update + async settings write —
-    // иначе round-trip через settings flow даёт лаг ~100-300ms, юзер видит 3x
-    // (унаследовано из VOD-сессии) до сброса.
-    private fun enforceLiveSpeed() {
-        liveStreamModel ?: return
-        if (viewState.playbackSpeed == 1f) return
-        viewState = viewState.copy(playbackSpeed = 1f)
-        scope.launch {
-            settingsRepository.setPreferredPlaybackSpeed(1f)
-        }
-    }
-
     override fun onVideoStateChanged(videoState: VideoState) {
+        if (stopping || !isPlaybackSessionActive() || viewState.postData == null) return
         when (videoState) {
             Idle -> {
                 cancelLoadingDebounce()
@@ -195,50 +217,78 @@ internal class VideoComponentImpl(
 
     private fun recoverPlayback() {
         autoRecoveryAttempted = true
+        refreshPlayback()
+    }
+
+    private fun refreshPlayback() {
+        if (stopping || !isPlaybackSessionActive()) {
+            viewState = viewState.copy(postData = null, loading = false, playbackError = true)
+            return
+        }
+        val generation = ++playbackGeneration
         recoverJob?.cancel()
         recoverJob = scope.launch {
             val fresh = fetchFreshPlayback()
+            coroutineContext.ensureActive()
+            if (generation != playbackGeneration || !isPlaybackSessionActive() || stopping) return@launch
             viewState = if (fresh != null) {
+                timeCodeManager.setContentId(fresh.video.id)
+                if (lifecycle.state == Lifecycle.State.STARTED || lifecycle.state == Lifecycle.State.RESUMED) {
+                    liveStreamModel?.startHeartbeat()
+                }
+                val video = if (liveStreamModel == null && lastPlaybackPosition != null) {
+                    fresh.video.copy(timeCode = lastPlaybackPosition!! / 1000L)
+                } else fresh.video
                 viewState.copy(
-                    postData = fresh.first,
-                    playerUrl = fresh.second,
+                    postData = video,
+                    postTitle = fresh.title,
+                    playerUrl = fresh.playerUrl,
                     playbackError = false,
                     loading = true,
                     retryToken = viewState.retryToken + 1,
                 )
             } else {
-                viewState.copy(playbackError = true, loading = false)
+                liveStreamModel?.stopHeartbeat()
+                viewState.copy(postData = null, playbackError = true, loading = false)
             }
         }
     }
 
-    private suspend fun fetchFreshPlayback(): Pair<Content.OkVideo, PlayerUrl>? {
-        val preferred = viewState.playerUrl.quality
-        val video = if (liveBlogUrl != null) {
-            streamRepository.fetchActive(liveBlogUrl).getOrNull()?.video
+    private suspend fun fetchFreshPlayback(): ResolvedPlayback? {
+        // Read preferred quality after the request: the user may change it while
+        // a signed URL is being renewed.
+        return if (liveBlogUrl != null) {
+            streamRepository.fetchActive(liveBlogUrl).getOrNull()
+                ?.resolvePlayback(postId, viewState.playerUrl.quality)
         } else {
-            val videoId = viewState.postData?.id ?: return null
             postRepository.getPost(blogUrl, postId).getOrNull()
-                ?.data?.filterIsInstance<Content.OkVideo>()
-                ?.find { it.id == videoId }
-        } ?: return null
-        val freshUrl = video.playerUrls.pickPlayerUrl(preferred) ?: return null
-        return video to freshUrl
+                ?.resolvePlayback(videoId, viewState.playerUrl.quality)
+        }
     }
 
     private fun handlePlaybackEnded() {
-        val model = liveStreamModel ?: return
+        viewState = viewState.copy(loading = false)
+        val model = liveStreamModel ?: run {
+            timeCodeManager.putLastPosition()
+            return
+        }
         if (viewState.streamEnded) return
         viewState = viewState.copy(streamEnded = true, loading = false)
         model.stopHeartbeat()
     }
 
     override fun onContentPositionChange(position: Long) {
-        if (liveStreamModel != null) return
+        if (liveStreamModel != null || stopping || !isPlaybackSessionActive() || position < 0) return
+        lastPlaybackPosition = position
         timeCodeManager.onPositionChanged(position)
     }
 
     override fun onStopClicked() {
+        if (stopping) return
+        stopping = true
+        playbackGeneration++
+        recoverJob?.cancel()
+        cancelLoadingDebounce()
         if (liveStreamModel != null) {
             liveStreamModel.stopHeartbeat()
         } else {
@@ -256,6 +306,7 @@ internal class VideoComponentImpl(
     }
 
     override fun onQualityItemClicked(playerUrl: PlayerUrl) {
+        if (playerUrl !in viewState.postData?.playerUrls.orEmpty().usableOptions()) return
         scope.launch {
             settingsRepository.setPreferredQuality(playerUrl.quality)
         }
@@ -266,6 +317,7 @@ internal class VideoComponentImpl(
     }
 
     override fun onPlaybackSpeedSelected(speed: Float) {
+        if (liveStreamModel != null || !speed.isFinite() || speed !in 0.5f..3f) return
         // Запись в Settings — единственная точка истины. State обновится через
         // subscribePlaybackSpeed-коллектор, иначе будут два writer'а на одно поле.
         scope.launch {
@@ -274,6 +326,8 @@ internal class VideoComponentImpl(
     }
 
     override fun onDownloadQualitySelected(playerUrl: PlayerUrl) {
+        if (liveStreamModel != null ||
+            playerUrl !in viewState.postData?.playerUrls.orEmpty().downloadableOptions()) return
         val title = viewState.postData?.title.orEmpty()
         val fileName = buildDownloadFileName(title, playerUrl)
         platformConfiguration.downloadVideo(
@@ -291,26 +345,6 @@ internal class VideoComponentImpl(
             .ifEmpty { "video" }
             .take(80)
         return "${safeTitle}_${playerUrl.quality.text}.mp4"
-    }
-
-    private fun refreshData(
-        blogUrl: String,
-        postId: String,
-        postData: Content.OkVideo,
-    ) {
-        scope.launch {
-            val post = postRepository.getPost(blogUrl, postId).getOrNull()
-            val refreshData = post?.data
-                ?.filterIsInstance<Content.OkVideo>()
-                ?.find { it.id == postData.id }
-                ?: postData
-            timeCodeManager.setContentId(refreshData.id)
-            viewState = viewState.copy(
-                postData = refreshData,
-                postTitle = post?.title,
-                loading = false,
-            )
-        }
     }
 
     private companion object {

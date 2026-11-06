@@ -1,9 +1,12 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.components.post
 
 import androidx.compose.runtime.Stable
 import com.arkivanov.decompose.ComponentContext
 import com.arkivanov.decompose.value.Value
 import kotlinx.collections.immutable.toImmutableList
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import ru.slartus.boostbuddy.components.BaseComponent
 import ru.slartus.boostbuddy.data.Inject
@@ -55,10 +58,12 @@ class PostComponentImpl(
 
     private fun subscribeToken() {
         scope.launch {
-            settingsRepository.tokenFlow.collect { token ->
-                if (token != null)
-                    fetchPost()
-            }
+            settingsRepository.sessionFlow
+                .map { it.sessionId to it.isAuthenticated }
+                .distinctUntilChanged()
+                .collect { (_, authenticated) ->
+                    if (authenticated) fetchPost()
+                }
         }
     }
 

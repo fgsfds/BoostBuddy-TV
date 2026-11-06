@@ -1,6 +1,6 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.ui.widgets
 
-import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.net.http.SslError
 import android.os.Build
@@ -39,6 +39,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,10 +54,11 @@ import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
@@ -65,21 +67,17 @@ import ru.slartus.boostbuddy.data.ktor.USER_AGENT
 import ru.slartus.boostbuddy.ui.common.BackHandlerEffect
 import ru.slartus.boostbuddy.ui.common.LocalPlatformConfiguration
 import ru.slartus.boostbuddy.utils.Platform
-import java.security.SecureRandom
-import java.security.cert.X509Certificate
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
+import ru.slartus.boostbuddy.utils.isBoostyWebOrigin
 import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
-import kotlin.coroutines.suspendCoroutine
 
 
 @Composable
 actual fun WebView(url: String, clickCoors: Offset?, onCookieChange: (String) -> Unit) {
     val isAtv = LocalPlatformConfiguration.current.platform == Platform.AndroidTV
     val scope = rememberCoroutineScope()
+    val latestOnCookieChange by rememberUpdatedState(onCookieChange)
     var buttons by remember { mutableStateOf<ImmutableList<HtmlButton>>(persistentListOf()) }
+    var webError by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val webViewMajorVersion = remember(context) {
         val ua = WebSettings.getDefaultUserAgent(context)
@@ -91,7 +89,8 @@ actual fun WebView(url: String, clickCoors: Offset?, onCookieChange: (String) ->
 
     val scanButtons: (view: WebView?) -> Unit = { view ->
         buttonsJob.cancel()
-        buttonsJob = scope.launch(SupervisorJob()) {
+        buttonsJob = scope.launch {
+            delay(100)
             buttons =
                 view?.getAllButtons().orEmpty()
                     .distinctBy { it.id }
@@ -99,7 +98,12 @@ actual fun WebView(url: String, clickCoors: Offset?, onCookieChange: (String) ->
                     .toImmutableList()
         }
     }
-    val webView = remember {
+    val reportCookies: (String?) -> Unit = { pageUrl ->
+        if (isBoostyWebOrigin(pageUrl)) {
+            latestOnCookieChange(CookieManager.getInstance().getCookie(pageUrl).orEmpty())
+        }
+    }
+    val webView = remember(context) {
         WebView(context).apply {
             this.setOnFocusChangeListener { _, b ->
                 webViewFocused = b
@@ -108,13 +112,15 @@ actual fun WebView(url: String, clickCoors: Offset?, onCookieChange: (String) ->
                 javaScriptEnabled = true
                 javaScriptCanOpenWindowsAutomatically = true
                 domStorageEnabled = true
+                allowFileAccess = false
+                allowContentAccess = false
+                mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                 setSupportMultipleWindows(true)
                 userAgentString = USER_AGENT
             }
             webViewClient = object : WebViewClient() {
                 override fun onLoadResource(view: WebView?, url: String?) {
-                    if (url != null)
-                        onCookieChange(CookieManager.getInstance().getCookie(url).orEmpty())
+                    reportCookies(url)
                     if (isAtv) {
                         scanButtons(this@apply)
                     }
@@ -125,22 +131,20 @@ actual fun WebView(url: String, clickCoors: Offset?, onCookieChange: (String) ->
                     handler: SslErrorHandler?,
                     error: SslError?
                 ) {
-                    Log.w(
-                        WV_TAG,
-                        "onReceivedSslError: primary=${error?.primaryError} url=${error?.url} cert=${error?.certificate?.issuedTo?.cName}"
-                    )
-                    handler?.proceed()
+                    // Never send account credentials over an unverified connection.
+                    handler?.cancel()
+                    webError = "Не удалось проверить защищённое соединение. Проверьте дату и время на ТВ и обновления Android System WebView."
+                    Log.w(WV_TAG, "Web login cancelled because TLS verification failed")
                 }
 
                 override fun onPageStarted(webView: WebView, url: String?, favicon: Bitmap?) {
-                    if (url != null)
-                        onCookieChange(CookieManager.getInstance().getCookie(url).orEmpty())
+                    webError = null
+                    reportCookies(url)
                 }
 
                 override fun onPageFinished(view: WebView?, currentUrl: String?) {
                     super.onPageFinished(view, currentUrl)
-                    if (currentUrl != null)
-                        onCookieChange(CookieManager.getInstance().getCookie(currentUrl).orEmpty())
+                    reportCookies(currentUrl)
                 }
 
                 override fun onReceivedError(
@@ -151,7 +155,7 @@ actual fun WebView(url: String, clickCoors: Offset?, onCookieChange: (String) ->
                 ) {
                     Log.e(
                         WV_TAG,
-                        "onReceivedError: code=$errorCode desc=$description url=$failingUrl"
+                        "Web login resource failed: code=$errorCode"
                     )
                 }
 
@@ -164,21 +168,10 @@ actual fun WebView(url: String, clickCoors: Offset?, onCookieChange: (String) ->
                 ): WebResourceResponse? =
                     injectPolyfillsIfNeeded(request) ?: super.shouldInterceptRequest(view, request)
             }
+            // Authentication pages may print credentials or token-bearing URLs.
+            // Do not copy their JavaScript console to application logs.
             webChromeClient = object : WebChromeClient() {
-                // JS console → logcat
-                override fun onConsoleMessage(msg: ConsoleMessage): Boolean {
-                    val level = when (msg.messageLevel()) {
-                        ConsoleMessage.MessageLevel.ERROR -> Log.ERROR
-                        ConsoleMessage.MessageLevel.WARNING -> Log.WARN
-                        else -> Log.DEBUG
-                    }
-                    Log.println(
-                        level,
-                        WV_JS_TAG,
-                        "${msg.message()} [${msg.sourceId()}:${msg.lineNumber()}]"
-                    )
-                    return true
-                }
+                override fun onConsoleMessage(message: ConsoleMessage): Boolean = true
             }
         }
     }
@@ -189,6 +182,14 @@ actual fun WebView(url: String, clickCoors: Offset?, onCookieChange: (String) ->
     }
 
     Column {
+        webError?.let { message ->
+            Text(
+                text = message,
+                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
         // boosty.to использует type="module" (ES modules) — требует Chrome 63+.
         // На старых WebView страница загружается, но JS не работает.
         if (webViewMajorVersion in 1..62) {
@@ -233,19 +234,20 @@ actual fun WebView(url: String, clickCoors: Offset?, onCookieChange: (String) ->
                         modifier = Modifier
                             .background(MaterialTheme.colorScheme.primaryContainer)
                             .clickable {
+                                val buttonId = Json.encodeToString(button.id)
                                 if (button.isInput) {
                                     webView.click(0f, 0f)
                                     webView.evaluateJavascript(
                                         "setTimeout(function() {" +
-                                                "document.getElementById(\"${button.id}\").focus();" +
-                                                "document.getElementById(\"${button.id}\").click();" +
+                                                "var target=document.getElementById($buttonId);" +
+                                                "if(target){target.focus();target.click();}" +
                                                 "}, 1000);",
 
                                         null
                                     )
                                 } else {
                                     webView.evaluateJavascript(
-                                        "document.getElementById(\"${button.id}\").click();",
+                                        "(function(){var target=document.getElementById($buttonId);if(target){target.click();}})();",
                                         null
                                     )
                                 }
@@ -267,7 +269,16 @@ actual fun WebView(url: String, clickCoors: Offset?, onCookieChange: (String) ->
                 .weight(1f),
             factory = {
                 webView
-            }
+            },
+            onRelease = { view ->
+                buttonsJob.cancel()
+                view.stopLoading()
+                view.webViewClient = WebViewClient()
+                view.webChromeClient = null
+                view.setOnFocusChangeListener(null)
+                view.removeAllViews()
+                view.destroy()
+            },
         )
     }
     LaunchedEffect(clickCoors) {
@@ -280,7 +291,7 @@ actual fun WebView(url: String, clickCoors: Offset?, onCookieChange: (String) ->
     }
 }
 
-private suspend fun WebView.getAllButtons(): List<HtmlButton> = suspendCoroutine { continuation ->
+private suspend fun WebView.getAllButtons(): List<HtmlButton> = suspendCancellableCoroutine { continuation ->
     val script =
         "Array.from(document.querySelectorAll(\"button, input, [role='button']\")).forEach(b => b.id = b.id||(Date.now().toString(36) + Math.random().toString(36).substr(2)));" +
                 "return Array.from(document.querySelectorAll(\"button, input, [role='button']\")).map(function(b){return {id: b.id, node: b.nodeName, text: b.innerText||b.placeholder||b.getAttribute('data-provider')}});"
@@ -291,13 +302,14 @@ private suspend fun WebView.getAllButtons(): List<HtmlButton> = suspendCoroutine
         isLenient = true
     }
     evaluateJavascript(functionScript) { result ->
-        runCatching {
-            val buttons = json.decodeFromString(
+        if (!continuation.isActive) return@evaluateJavascript
+        val buttons = runCatching {
+            json.decodeFromString(
                 ListSerializer(HtmlButton.serializer()),
                 result
             )
-            continuation.resume(buttons)
-        }.onFailure { continuation.resumeWithException(it) }
+        }.getOrDefault(emptyList())
+        continuation.resume(buttons)
     }
 }
 
@@ -328,12 +340,14 @@ private fun View.click(x: Float, y: Float) {
         pointerCoords, 0, 0, 1f, 1f, 0, 0, 0, 0
     )
     dispatchTouchEvent(motionEvent)
+    motionEvent.recycle()
     motionEvent = MotionEvent.obtain(
         downTime, eventTime,
         MotionEvent.ACTION_UP, 1, properties,
         pointerCoords, 0, 0, 1f, 1f, 0, 0, 0, 0
     )
     dispatchTouchEvent(motionEvent)
+    motionEvent.recycle()
 }
 
 private fun View.simulateClick(coroutineScope: CoroutineScope, x: Float, y: Float) {
@@ -352,9 +366,15 @@ private fun View.simulateClick(coroutineScope: CoroutineScope, x: Float, y: Floa
 // Возвращает null, если перехват не нужен — вызывающий должен делегировать super.
 private fun injectPolyfillsIfNeeded(request: WebResourceRequest?): WebResourceResponse? {
     if (Build.VERSION.SDK_INT > Build.VERSION_CODES.N_MR1) return null
-    val accept = request?.requestHeaders?.get("Accept") ?: ""
+    request ?: return null
+    // A request body is unavailable here: intercepting a login POST as a GET
+    // breaks authentication. Keep the compatibility shim on the website only.
+    if (!request.isForMainFrame || request.method != "GET") return null
+    val urlString = request.url.toString()
+    if (!isBoostyWebOrigin(urlString)) return null
+    val accept = request.requestHeaders.entries
+        .firstOrNull { it.key.equals("Accept", ignoreCase = true) }?.value.orEmpty()
     if (!accept.contains("text/html")) return null
-    val urlString = request?.url?.toString() ?: return null
     return try {
         val okRequest = Request.Builder()
             .url(urlString)
@@ -364,55 +384,43 @@ private fun injectPolyfillsIfNeeded(request: WebResourceRequest?): WebResourceRe
                 if (!cookies.isNullOrEmpty()) builder.header("Cookie", cookies)
             }
             .build()
-        val response = polyfillOkHttpClient.newCall(okRequest).execute()
-        if (!response.isSuccessful) {
-            Log.w(
-                WV_TAG,
-                "injectPolyfillsIfNeeded non-2xx (${response.code}), falling back to WebView"
+        polyfillOkHttpClient.newCall(okRequest).execute().use { response ->
+            if (!response.isSuccessful) return null
+            val body = response.body ?: return null
+            val mimeType = response.header("Content-Type")
+                ?.substringBefore(';')?.trim() ?: return null
+            if (!mimeType.equals("text/html", ignoreCase = true)) return null
+            response.headers.values("Set-Cookie").forEach {
+                CookieManager.getInstance().setCookie(urlString, it)
+            }
+            var html = body.string()
+            html = html.replace(Regex("""\s*type="module""""), "")
+            val headMatch = Regex("<head[^>]*>", RegexOption.IGNORE_CASE).find(html)
+            val modified = if (headMatch != null) {
+                html.substring(0, headMatch.range.last + 1) +
+                    android7Polyfill + html.substring(headMatch.range.last + 1)
+            } else html
+            val headers = response.headers.toMultimap().entries
+                .filterNot { it.key.lowercase() in setOf("content-length", "content-encoding", "set-cookie") }
+                .associate { it.key to it.value.joinToString(", ") }
+            WebResourceResponse(
+                mimeType, "utf-8", response.code, response.message.ifBlank { "OK" },
+                headers, modified.byteInputStream(Charsets.UTF_8),
             )
-            return null
         }
-        val body = response.body ?: return null
-        val rawContentType = response.header("Content-Type") ?: "text/html"
-        val mimeType = rawContentType.split(";").first().trim()
-        val charset = rawContentType.split("charset=").getOrNull(1)?.trim() ?: "utf-8"
-        // Chrome 53 не поддерживает type="module" → скрипт игнорируется.
-        // Убираем атрибут чтобы скрипт загрузился как обычный defer-скрипт.
-        // Помогает Chrome 63+ (dynamic import поддерживается).
-        var html = body.string()
-        html = html.replace(Regex("""\s*type="module""""), "")
-        val headMatch = Regex("<head[^>]*>").find(html)
-        val modified = if (headMatch != null) {
-            html.substring(0, headMatch.range.last + 1) +
-                    android7Polyfill +
-                    html.substring(headMatch.range.last + 1)
-        } else html
-        WebResourceResponse(mimeType, charset, modified.byteInputStream(Charsets.UTF_8))
     } catch (e: Exception) {
-        Log.e(WV_TAG, "injectPolyfillsIfNeeded exception: ${e.message}", e)
+        Log.w(WV_TAG, "Website compatibility request failed: ${e.javaClass.simpleName}")
         null
     }
 }
 
 private const val WV_TAG = "BoostWebView"
-private const val WV_JS_TAG = "BoostWebView.JS"
 
 // OkHttpClient для скачивания HTML в shouldInterceptRequest на Android 7.
 // Использует okhttp3 (не com.android.okhttp) — он поддерживает современные
 // cipher suites и TLS 1.2 там, где системный HttpURLConnection ломается.
 private val polyfillOkHttpClient: OkHttpClient by lazy {
-    @SuppressLint("CustomX509TrustManager", "TrustAllX509TrustManager")
-    val trustManager = object : X509TrustManager {
-        override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) = Unit
-        override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) = Unit
-        override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-    }
-    val sslContext = SSLContext.getInstance("TLS").also {
-        it.init(null, arrayOf<TrustManager>(trustManager), SecureRandom())
-    }
     OkHttpClient.Builder()
-        .sslSocketFactory(sslContext.socketFactory, trustManager)
-        .hostnameVerifier { _, _ -> true }
         .followRedirects(false)
         .build()
 }

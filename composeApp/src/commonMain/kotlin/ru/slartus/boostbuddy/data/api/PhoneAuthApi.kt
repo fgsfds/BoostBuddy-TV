@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.data.api
 
 import io.ktor.client.HttpClient
@@ -69,11 +70,15 @@ internal data class PhoneCodeChallenge(
     val sentTransport: String? = null,
     val expiresIn: Long? = null,
     val phone: String? = null,
-)
+) {
+    override fun toString(): String = "PhoneCodeChallenge(redacted)"
+}
 
 @Serializable
 internal data class PhoneConfirmCodeResponse(
     @SerialName("access_token") val accessToken: String? = null,
     @SerialName("refresh_token") val refreshToken: String? = null,
     @SerialName("expires_in") val expiresIn: Long? = null,
-)
+) {
+    override fun toString(): String = "PhoneConfirmCodeResponse(redacted)"
+}

@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.ui.tv
 
 import androidx.activity.compose.BackHandler
@@ -45,7 +46,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -55,6 +55,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -78,6 +79,7 @@ import com.seiko.imageloader.rememberImagePainter
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import ru.slartus.boostbuddy.components.subscribes.SubscribesViewState
+import ru.slartus.boostbuddy.components.tv.TvFocusState
 import ru.slartus.boostbuddy.data.repositories.Blog
 
 internal object TvColors {
@@ -93,20 +95,37 @@ internal object TvColors {
 
 @Stable
 internal class TvContentFocus {
-    var request by mutableIntStateOf(1)
-        private set
-    var sidebarHasFocus by mutableStateOf(false)
+    private var state by mutableStateOf(TvFocusState())
+    val request: Long get() = state.revision
+    val sidebarHasFocus: Boolean get() = state.sidebarHasFocus
+    val focusedContentKey: String? get() = state.focusedContentKey
+    val allowHeaderFallback: Boolean get() = state.allowHeaderFallback
     internal var sidebarAction: () -> Unit = {}
 
-    fun enterContent() {
-        sidebarHasFocus = false
-        request++
+    fun enterContent(allowHeaderFallback: Boolean = true) {
+        state = state.requestContent(allowHeaderFallback)
     }
 
-    fun contentFocused() { sidebarHasFocus = false }
+    fun contentFocused() { state = state.contentFocused() }
+    fun itemFocused(key: String) { state = state.contentFocused(key) }
+    fun sidebarFocused() { state = state.sidebarFocused() }
+    fun sidebarInteraction() { state = state.requestSidebar() }
+    fun canRequestContent(request: Long): Boolean = state.canRequestContent(request)
+    fun canRequestSidebar(request: Long): Boolean = state.canRequestSidebar(request)
+    fun completeContentRequest(request: Long, key: String? = null) {
+        if (canRequestContent(request)) state = state.contentFocused(key)
+    }
+    fun completeSidebarRequest(request: Long) {
+        if (canRequestSidebar(request)) state = state.sidebarFocused()
+    }
+
     fun enterSidebar() {
         if (sidebarHasFocus) return
-        sidebarHasFocus = true
+        restoreSidebar()
+    }
+
+    fun restoreSidebar() {
+        state = state.requestSidebar()
         sidebarAction()
     }
 }
@@ -138,25 +157,55 @@ internal fun TvBrowseScreen(
     }
     val requesters = remember { mutableMapOf<String, FocusRequester>() }
     val creators = remember(subscriptions) { subscriptions.creatorBlogs() }
-    val sidebarKeys = remember(creators) {
-        listOf("feed", "subscriptions", "search", "settings", "logout", "divider") + creators.map { "creator:${it.blogUrl}" }
+    val navigation = remember {
+        listOf(
+            Triple("feed", "Лента", Icons.Rounded.Home),
+            Triple("subscriptions", "Подписки", Icons.Rounded.Subscriptions),
+            Triple("search", "Поиск", Icons.Rounded.Search),
+            Triple("settings", "Настройки", Icons.Rounded.Settings),
+            Triple("logout", "Выйти", Icons.Rounded.Logout),
+        )
+    }
+    val sidebarKeys = remember(creators, subscriptions, browseState.sidebarExpanded) {
+        navigation.map { it.first } + "divider" + creators.map { "creator:${it.blogUrl}" } +
+            when (subscriptions) {
+                SubscribesViewState.ProgressState.Init,
+                SubscribesViewState.ProgressState.Loading -> listOf("loading")
+                is SubscribesViewState.ProgressState.Error -> listOf("subscriptions_error")
+                is SubscribesViewState.ProgressState.Loaded ->
+                    if (creators.isEmpty() && browseState.sidebarExpanded) listOf("no_creators") else emptyList()
+            }
     }
     val sidebarWidth by animateDpAsState(if (browseState.sidebarExpanded) 224.dp else 76.dp, label = "sidebarWidth")
     val requestSidebar: () -> Unit = {
-        focus.sidebarHasFocus = true
+        val request = focus.request
         browseState.sidebarExpanded = true
         scope.launch {
+            if (!focus.canRequestSidebar(request)) return@launch
             val target = browseState.sidebarFocusKey.takeIf { it in sidebarKeys } ?: "feed"
             val index = sidebarKeys.indexOf(target).coerceAtLeast(0)
             sidebarListState.scrollToItem(index)
-            val restored = requestTvFocus({ requesters[target] })
-            if (!restored) {
+            val restored = requestTvFocus({ requesters[target] }, { focus.canRequestSidebar(request) })
+            if (restored) {
+                focus.completeSidebarRequest(request)
+            } else if (focus.canRequestSidebar(request)) {
                 sidebarListState.scrollToItem(0)
-                if (!requestTvFocus({ requesters["feed"] })) focus.sidebarHasFocus = false
+                if (requestTvFocus({ requesters["feed"] }, { focus.canRequestSidebar(request) })) {
+                    focus.completeSidebarRequest(request)
+                } else if (focus.canRequestSidebar(request)) {
+                    focus.enterContent()
+                }
             }
         }
     }
     SideEffect { focus.sidebarAction = requestSidebar }
+    LaunchedEffect(sidebarKeys) {
+        // Refresh can remove the focused creator or retry row while the rail is active.
+        if (focus.sidebarHasFocus && browseState.sidebarFocusKey !in sidebarKeys) {
+            browseState.sidebarFocusKey = "subscriptions"
+            focus.restoreSidebar()
+        }
+    }
 
     // First Back returns to the navigation rail. A second Back follows the app's root navigation.
     BackHandler(enabled = !focus.sidebarHasFocus) { focus.enterSidebar() }
@@ -164,6 +213,10 @@ internal fun TvBrowseScreen(
     Row(modifier.fillMaxSize().background(TvColors.Background)) {
         Column(
             Modifier.width(sidebarWidth).fillMaxHeight().background(TvColors.Sidebar)
+                .onPreviewKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyDown) focus.sidebarInteraction()
+                    false
+                }
                 .padding(top = 20.dp, bottom = 12.dp),
         ) {
             Row(
@@ -171,10 +224,13 @@ internal fun TvBrowseScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 TvFocusableSurface(
-                    onClick = { browseState.sidebarExpanded = !browseState.sidebarExpanded },
+                    onClick = {
+                        focus.sidebarInteraction()
+                        browseState.sidebarExpanded = !browseState.sidebarExpanded
+                    },
                     modifier = Modifier.size(42.dp),
                     shape = RoundedCornerShape(12.dp),
-                    onFocused = { focus.sidebarHasFocus = true },
+                    onFocused = focus::sidebarFocused,
                 ) { focused ->
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Icon(
@@ -196,13 +252,6 @@ internal fun TvBrowseScreen(
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
-                val navigation = listOf(
-                    Triple("feed", "Лента", Icons.Rounded.Home),
-                    Triple("subscriptions", "Подписки", Icons.Rounded.Subscriptions),
-                    Triple("search", "Поиск", Icons.Rounded.Search),
-                    Triple("settings", "Настройки", Icons.Rounded.Settings),
-                    Triple("logout", "Выйти", Icons.Rounded.Logout),
-                )
                 items(navigation, key = { it.first }) { (key, label, icon) ->
                     val section = when (key) {
                         "feed" -> TvSection.Feed
@@ -216,10 +265,12 @@ internal fun TvBrowseScreen(
                         expanded = browseState.sidebarExpanded,
                         selected = selectedCreator == null && section != null && browseState.section == section,
                         requester = requesters.getOrPut(key) { FocusRequester() },
-                        onFocused = { focus.sidebarHasFocus = true; browseState.sidebarFocusKey = key },
+                        onFocused = { focus.sidebarFocused(); browseState.sidebarFocusKey = key },
                         onEnterContent = { browseState.sidebarExpanded = false; focus.enterContent() },
                         onClick = {
+                            focus.sidebarInteraction()
                             if (section != null) {
+                                browseState.searchFocusRequested = section == TvSection.Search
                                 onSectionSelected(section)
                                 focus.enterContent()
                             } else when (key) {
@@ -246,9 +297,11 @@ internal fun TvBrowseScreen(
                         expanded = browseState.sidebarExpanded,
                         selected = selectedCreator == creator.blogUrl,
                         requester = requesters.getOrPut(key) { FocusRequester() },
-                        onFocused = { focus.sidebarHasFocus = true; browseState.sidebarFocusKey = key },
+                        onFocused = { focus.sidebarFocused(); browseState.sidebarFocusKey = key },
                         onEnterContent = { browseState.sidebarExpanded = false; focus.enterContent() },
                         onClick = {
+                            focus.sidebarInteraction()
+                            browseState.searchFocusRequested = false
                             browseState.sidebarFocusKey = key
                             if (selectedCreator != creator.blogUrl) onCreatorSelected(creator)
                             focus.enterContent()
@@ -269,9 +322,9 @@ internal fun TvBrowseScreen(
                             expanded = browseState.sidebarExpanded,
                             selected = false,
                             requester = requesters.getOrPut("subscriptions_error") { FocusRequester() },
-                            onFocused = { focus.sidebarHasFocus = true },
+                            onFocused = { focus.sidebarFocused(); browseState.sidebarFocusKey = "subscriptions_error" },
                             onEnterContent = { focus.enterContent() },
-                            onClick = onRefreshSubscriptions,
+                            onClick = { focus.sidebarInteraction(); onRefreshSubscriptions() },
                         )
                     }
                     is SubscribesViewState.ProgressState.Loaded -> if (creators.isEmpty() && browseState.sidebarExpanded) item("no_creators") {
@@ -393,7 +446,12 @@ internal suspend fun requestTvFocus(
     repeat(3) {
         withFrameNanos { }
         if (!canRequest()) return false
-        if (runCatching { requester()?.let { it.requestFocus(); true } ?: false }.getOrDefault(false)) return true
+        val granted = try {
+            requester()?.requestFocus(FocusDirection.Enter) == true
+        } catch (_: IllegalStateException) {
+            false // A lazy item may not have attached its focus target yet.
+        }
+        if (granted) return true
     }
     return false
 }

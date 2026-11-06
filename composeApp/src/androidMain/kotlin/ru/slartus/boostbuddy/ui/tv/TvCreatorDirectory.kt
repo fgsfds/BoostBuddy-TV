@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.ui.tv
 
 import androidx.compose.foundation.background
@@ -23,10 +24,7 @@ import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -45,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.flow.distinctUntilChanged
 import ru.slartus.boostbuddy.components.subscribes.SubscribesViewState
+import ru.slartus.boostbuddy.components.tv.restoredTvGridIndex
 import ru.slartus.boostbuddy.data.repositories.Blog
 
 @Composable
@@ -56,6 +55,8 @@ internal fun TvCreatorDirectory(
     onRefresh: () -> Unit,
 ) {
     val creators = remember(subscriptions) { subscriptions.creatorBlogs() }
+    val refreshRequester = remember { FocusRequester() }
+    val retry = { focus.enterContent(allowHeaderFallback = false); onRefresh() }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(bottom = 23.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -63,15 +64,15 @@ internal fun TvCreatorDirectory(
                 Spacer(Modifier.height(3.dp))
                 Text("Выберите автора, чтобы открыть его видео", color = TvColors.Secondary, fontSize = 12.sp)
             }
-            TvActionButton("Обновить", onRefresh, Modifier.leftToSidebar(focus), Icons.Rounded.Refresh, focus::contentFocused)
+            TvActionButton("Обновить", onRefresh, Modifier.focusRequester(refreshRequester).leftToSidebar(focus), Icons.Rounded.Refresh, focus::contentFocused)
         }
         when (subscriptions) {
             SubscribesViewState.ProgressState.Init,
-            SubscribesViewState.ProgressState.Loading -> TvLoadingPanel("Загружаем авторов…")
-            is SubscribesViewState.ProgressState.Error -> TvStatusPanel("Не удалось загрузить подписки", subscriptions.description, Icons.Rounded.WarningAmber, "Повторить", onRefresh, focus)
+            SubscribesViewState.ProgressState.Loading -> TvLoadingPanel("Загружаем авторов…", focus, refreshRequester)
+            is SubscribesViewState.ProgressState.Error -> TvStatusPanel("Не удалось загрузить подписки", subscriptions.description, Icons.Rounded.WarningAmber, "Повторить", retry, focus)
             is SubscribesViewState.ProgressState.Loaded -> {
                 if (creators.isEmpty()) {
-                    TvStatusPanel("Подписок пока нет", "Авторы, на которых вы подписаны в Boosty, появятся здесь.", Icons.Rounded.Subscriptions, "Обновить", onRefresh, focus)
+                    TvStatusPanel("Подписок пока нет", "Авторы, на которых вы подписаны в Boosty, появятся здесь.", Icons.Rounded.Subscriptions, "Обновить", retry, focus)
                 } else {
                     TvCreatorGrid(creators, browseState, focus, onCreatorSelected)
                 }
@@ -90,18 +91,27 @@ private fun TvCreatorGrid(
     val bookmark = remember { browseState.bookmark("subscriptions") }
     val grid = remember { LazyGridState(bookmark.index, bookmark.offset) }
     val requesters = remember { mutableMapOf<String, FocusRequester>() }
-    var handledRequest by remember { mutableIntStateOf(-1) }
+    val keys = remember(creators) { creators.map { it.blogUrl } }
     LaunchedEffect(grid) {
         snapshotFlow { grid.firstVisibleItemIndex to grid.firstVisibleItemScrollOffset }.distinctUntilChanged()
             .collect { (index, offset) -> bookmark.index = index; bookmark.offset = offset }
     }
-    LaunchedEffect(focus.request, creators.isNotEmpty()) {
-        if (creators.isNotEmpty() && !focus.sidebarHasFocus && handledRequest != focus.request) {
-            val index = creators.indexOfFirst { it.blogUrl == bookmark.focusedKey }.takeIf { it >= 0 } ?: 0
-            val key = creators[index].blogUrl
-            withFrameNanos { }
-            if (grid.layoutInfo.visibleItemsInfo.none { it.key == key }) grid.scrollToItem(index)
-            if (requestTvFocus({ requesters[key] }, { !focus.sidebarHasFocus })) handledRequest = focus.request
+    LaunchedEffect(focus.request, keys) {
+        if (focus.sidebarHasFocus) return@LaunchedEffect
+        if (focus.focusedContentKey?.let { it !in keys } == true) {
+            focus.enterContent(allowHeaderFallback = false)
+            return@LaunchedEffect
+        }
+        val request = focus.request
+        if (!focus.canRequestContent(request)) return@LaunchedEffect
+        val index = restoredTvGridIndex(keys, bookmark.focusedKey, bookmark.focusedIndex)
+            ?: return@LaunchedEffect
+        val key = keys[index]
+        withFrameNanos { }
+        if (!focus.canRequestContent(request)) return@LaunchedEffect
+        if (grid.layoutInfo.visibleItemsInfo.none { it.key == key }) grid.scrollToItem(index)
+        if (requestTvFocus({ requesters[key] }, { focus.canRequestContent(request) })) {
+            focus.completeContentRequest(request, key)
         }
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -118,10 +128,16 @@ private fun TvCreatorGrid(
                 TvFocusableSurface(
                     onClick = {
                         bookmark.focusedKey = creator.blogUrl
+                        bookmark.focusedIndex = index
+                        browseState.searchFocusRequested = false
                         browseState.sidebarFocusKey = "creator:${creator.blogUrl}"
                         onCreatorSelected(creator)
                     },
-                    onFocused = { bookmark.focusedKey = creator.blogUrl; focus.contentFocused() },
+                    onFocused = {
+                        bookmark.focusedKey = creator.blogUrl
+                        bookmark.focusedIndex = index
+                        focus.itemFocused(creator.blogUrl)
+                    },
                     modifier = Modifier.fillMaxWidth().focusRequester(requesters.getOrPut(creator.blogUrl) { FocusRequester() })
                         .onPreviewKeyEvent { event ->
                             when {

@@ -68,6 +68,9 @@ kotlin {
 
         commonTest.dependencies {
             implementation(kotlin("test"))
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:${libs.versions.kotlinx.coroutines.get()}")
+            implementation("com.russhwolf:multiplatform-settings-test:${libs.versions.multiplatformSettings.get()}")
+            implementation("io.ktor:ktor-client-mock:${libs.versions.ktor.get()}")
         }
 
         androidMain.dependencies {
@@ -86,6 +89,13 @@ kotlin {
             implementation(libs.android.splashscreen)
         }
 
+        androidUnitTest.dependencies {
+            // Match the OkHttp version used by Ktor 3.1.1. Tests use a local
+            // HTTPS server to prove debug builds reject invalid certificates.
+            implementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+            implementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
+        }
+
         iosMain.dependencies {
             implementation(libs.ktor.darwin)
         }
@@ -102,8 +112,8 @@ android {
         targetSdk = 34
 
         applicationId = "ru.slartus.boostbuddy.tvfork"
-        versionCode = 89
-        versionName = "1.16.0-tv.1"
+        versionCode = 90
+        versionName = "1.16.0-tv.2"
     }
 
     // Release signing is optional and always supplied by the fork owner.

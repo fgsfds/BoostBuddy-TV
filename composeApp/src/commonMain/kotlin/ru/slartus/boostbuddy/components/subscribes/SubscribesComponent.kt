@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.components.subscribes
 
 import androidx.compose.runtime.Stable
@@ -7,6 +8,9 @@ import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import ru.slartus.boostbuddy.components.BaseComponent
 import ru.slartus.boostbuddy.data.Inject
@@ -19,7 +23,6 @@ import ru.slartus.boostbuddy.navigation.NavigationRouter
 import ru.slartus.boostbuddy.navigation.NavigationTree
 import ru.slartus.boostbuddy.navigation.navigateTo
 import ru.slartus.boostbuddy.utils.messageOrThrow
-import ru.slartus.boostbuddy.utils.unauthorizedError
 
 @Stable
 interface SubscribesComponent {
@@ -55,6 +58,7 @@ class SubscribesComponentImpl(
     private val profileRepository by Inject.lazy<ProfileRepository>()
     private val navigationRouter by Inject.lazy<NavigationRouter>()
     private var fetchJob: Job? = null
+    private var fetchGeneration = 0L
 
     init {
         subscribeToken()
@@ -62,23 +66,33 @@ class SubscribesComponentImpl(
 
     private fun subscribeToken() {
         scope.launch {
-            settingsRepository.tokenFlow.collect { token ->
-                if (token != null)
-                    fetchSubscribes()
-            }
+            settingsRepository.sessionFlow
+                .map { it.sessionId to it.isAuthenticated }
+                .distinctUntilChanged()
+                .collect { fetchSubscribes() }
         }
     }
 
     private fun fetchSubscribes() {
+        val generation = ++fetchGeneration
+        fetchJob?.cancel()
+        val session = settingsRepository.sessionSnapshot()
+        if (!session.isAuthenticated) {
+            viewState = viewState.copy(progressProgressState = SubscribesViewState.ProgressState.Init)
+            return
+        }
         viewState =
             viewState.copy(progressProgressState = SubscribesViewState.ProgressState.Loading)
 
-        fetchJob?.cancel()
         fetchJob = scope.launch {
             val subsDeferred = async { subscribesRepository.getSubscribes() }
             val myBlogDeferred = async { fetchMyBlog() }
             val subsResponse = subsDeferred.await()
             val myBlog = myBlogDeferred.await()
+            coroutineContext.ensureActive()
+            val currentSession = settingsRepository.sessionSnapshot()
+            if (generation != fetchGeneration || !currentSession.isAuthenticated ||
+                currentSession.sessionId != session.sessionId) return@launch
 
             if (subsResponse.isFailure) {
                 viewState = viewState.copy(
@@ -103,10 +117,7 @@ class SubscribesComponentImpl(
     }
 
     override fun refresh() {
-        scope.launch {
-            val token = settingsRepository.getAccessToken() ?: unauthorizedError()
-            fetchSubscribes()
-        }
+        fetchSubscribes()
     }
 
     override fun onItemClicked(item: SubscribeItem) {

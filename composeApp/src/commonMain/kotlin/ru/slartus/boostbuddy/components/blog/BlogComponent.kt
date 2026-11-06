@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.components.blog
 
 import androidx.compose.runtime.Stable
@@ -8,10 +9,12 @@ import com.arkivanov.decompose.router.slot.activate
 import com.arkivanov.decompose.router.slot.childSlot
 import com.arkivanov.decompose.router.slot.dismiss
 import com.arkivanov.decompose.value.Value
+import com.arkivanov.essenty.lifecycle.Lifecycle
+import com.arkivanov.essenty.lifecycle.doOnStart
+import com.arkivanov.essenty.lifecycle.doOnStop
 import kotlinx.atomicfu.atomic
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
@@ -20,6 +23,7 @@ import kotlinx.serialization.Serializable
 import ru.slartus.boostbuddy.components.common.ProgressState
 import ru.slartus.boostbuddy.components.feed.FeedPostItem
 import ru.slartus.boostbuddy.components.feed.PostsFeedComponent
+import ru.slartus.boostbuddy.components.video.usableOptions
 import ru.slartus.boostbuddy.components.filter.Filter
 import ru.slartus.boostbuddy.components.filter.FilterComponent
 import ru.slartus.boostbuddy.components.filter.FilterComponentImpl
@@ -81,6 +85,8 @@ class BlogComponentImpl(
     private val navigationRouter by Inject.lazy<NavigationRouter>()
     private val platformConfiguration by Inject.lazy<PlatformConfiguration>()
     private var liveStreamJob: Job? = null
+    private var blogInfoJob: Job? = null
+    private var liveStreamGeneration = 0L
     private var schedulePollingJob: Job? = null
     private val likeRequestInFlight = atomic(false)
     override val extra: Extra? get() = viewState.extra
@@ -89,6 +95,12 @@ class BlogComponentImpl(
 
     init {
         subscribeToken()
+        lifecycle.doOnStart { fetchLiveStream() }
+        lifecycle.doOnStop {
+            liveStreamGeneration++
+            liveStreamJob?.cancel()
+            stopSchedulePolling()
+        }
     }
 
     override val dialogSlot: Value<ChildSlot<*, BlogComponent.DialogChild>> = childSlot(
@@ -124,33 +136,39 @@ class BlogComponentImpl(
         refresh()
     }
 
-    override fun tokenChanged(token: String?) {
-        super.tokenChanged(token)
-        fetchBlogInfo()
-        if (token != null) {
+    override fun sessionChanged(sessionId: Long, authenticated: Boolean) {
+        super.sessionChanged(sessionId, authenticated)
+        liveStreamGeneration++
+        liveStreamJob?.cancel()
+        blogInfoJob?.cancel()
+        stopSchedulePolling()
+        viewState = viewState.copy(liveStream = null)
+        if (authenticated) {
+            fetchBlogInfo()
             fetchLiveStream()
-        } else {
-            stopSchedulePolling()
-            viewState = viewState.copy(liveStream = null)
         }
     }
 
     private fun fetchBlogInfo() {
-        scope.launch {
+        val sessionId = authenticatedSessionId() ?: return
+        blogInfoJob?.cancel()
+        blogInfoJob = scope.launch {
             val result = blogRepository.fetchInfo(blog.blogUrl)
-            if (result.isSuccess) {
+            coroutineContext.ensureActive()
+            if (result.isSuccess && isCurrentSession(sessionId)) {
                 viewState = viewState.copy(blog = result.getOrThrow())
             }
         }
     }
 
     private fun fetchLiveStream() {
-        val previous = liveStreamJob
+        val sessionId = authenticatedSessionId() ?: return
+        val generation = ++liveStreamGeneration
+        liveStreamJob?.cancel()
         liveStreamJob = scope.launch {
-            previous?.cancelAndJoin()
             val result = streamRepository.fetchActive(blog.blogUrl)
             coroutineContext.ensureActive()
-            if (result.isSuccess) {
+            if (result.isSuccess && generation == liveStreamGeneration && isCurrentSession(sessionId)) {
                 val newStream = result.getOrNull()
                 viewState = viewState.copy(liveStream = newStream)
                 updateSchedulePolling(newStream)
@@ -167,6 +185,7 @@ class BlogComponentImpl(
     }
 
     private fun startSchedulePollingIfNeeded() {
+        if (lifecycle.state != Lifecycle.State.STARTED && lifecycle.state != Lifecycle.State.RESUMED) return
         if (schedulePollingJob?.isActive == true) return
         schedulePollingJob = scope.launch {
             while (isActive) {
@@ -234,7 +253,7 @@ class BlogComponentImpl(
         if (liveStatus != null &&
             stream.hasAccess &&
             video != null &&
-            video.playerUrls.isNotEmpty()
+            video.playerUrls.usableOptions().isNotEmpty()
         ) {
             navigationRouter.navigateTo(
                 NavigationTree.LiveStream(
@@ -250,6 +269,7 @@ class BlogComponentImpl(
     }
 
     override fun onLiveStreamLikeClicked() {
+        val sessionId = authenticatedSessionId() ?: return
         if (!likeRequestInFlight.compareAndSet(expect = false, update = true)) return
         val stream = viewState.liveStream
         if (stream == null) {
@@ -264,7 +284,8 @@ class BlogComponentImpl(
         scope.launch {
             try {
                 val result = streamRepository.setLiked(blog.blogUrl, newLiked)
-                if (result.isFailure) {
+                coroutineContext.ensureActive()
+                if (result.isFailure && isCurrentSession(sessionId)) {
                     val current = viewState.liveStream ?: return@launch
                     if (current.id == stream.id) {
                         viewState = viewState.copy(

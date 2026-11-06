@@ -4,7 +4,7 @@ package ru.slartus.boostbuddy.data.ktor
 import io.ktor.client.HttpClient
 import io.ktor.client.HttpClientConfig
 import io.ktor.client.call.body
-import io.ktor.client.engine.HttpClientEngineConfig
+import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.UserAgent
 import io.ktor.client.plugins.api.Send
@@ -22,14 +22,19 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.Parameters
 import io.ktor.http.URLProtocol
+import io.ktor.http.Url
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.datetime.Clock
 import kotlinx.serialization.json.Json
 import ru.slartus.boostbuddy.data.log.logger
 import ru.slartus.boostbuddy.data.repositories.SettingsRepository
+import ru.slartus.boostbuddy.data.repositories.SessionTokens
+import ru.slartus.boostbuddy.data.repositories.tokenExpiryEpochSeconds
 import ru.slartus.boostbuddy.data.repositories.models.TokenRefreshResponse
 
 internal const val USER_AGENT =
@@ -38,44 +43,20 @@ internal const val USER_AGENT =
 internal const val DESKTOP_USER_AGENT =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 
-private const val REFRESH_THRESHOLD_SECONDS = 300L // 5 минут до истечения
-
 internal fun buildBoostyHttpClient(
     debugLog: Boolean,
     settingsRepository: SettingsRepository,
-    json: Json
+    json: Json,
+    engine: HttpClientEngine? = null,
+    refreshClient: HttpClient = buildBoostyAuthHttpClient(debugLog, json),
 ): HttpClient {
-    val refreshMutex = Mutex()
-
-    val refreshClient by lazy {
-        HttpClient(HttpEngineFactory().createEngine(debugLog)) {
-            expectSuccess = true
-            install(ContentNegotiation) { json(json) }
-            install(UserAgent) { agent = DESKTOP_USER_AGENT }
-            install(HttpTimeout) {
-                connectTimeoutMillis = 15000
-                requestTimeoutMillis = 30000
-            }
-            defaultRequest {
-                url {
-                    protocol = URLProtocol.HTTPS
-                    host = "api.boosty.to"
-                }
-                header("X-App", "web")
-                header("X-Locale", "ru_RU")
-                header(HttpHeaders.Referrer, "https://boosty.to/")
-                header(HttpHeaders.Origin, "https://boosty.to")
-                header(HttpHeaders.Accept, "application/json, text/plain, */*")
-                headers.remove(HttpHeaders.AcceptCharset)
-            }
-        }
-    }
-
-    suspend fun doRefresh(): String? {
-        val storedRefreshToken = settingsRepository.getRefreshToken()
-        if (storedRefreshToken.isNullOrEmpty()) return null
-
-        return try {
+    val refreshScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    val tokenManager = SessionTokenManager(
+        settings = settingsRepository,
+        refreshScope = refreshScope,
+        nowSeconds = { Clock.System.now().epochSeconds },
+    ) { tokens ->
+        try {
             val deviceId = settingsRepository.getOrCreateDeviceId()
             val response: TokenRefreshResponse = refreshClient.post("oauth/token/") {
                 header("X-From-Id", deviceId)
@@ -85,74 +66,48 @@ internal fun buildBoostyHttpClient(
                             append("device_id", deviceId)
                             append("device_os", "web")
                             append("grant_type", "refresh_token")
-                            append("refresh_token", storedRefreshToken)
+                            append("refresh_token", requireNotNull(tokens.refreshToken))
                         }
                     )
                 )
             }.body()
-
-            val newAccessToken = response.accessToken
-            if (newAccessToken.isNullOrEmpty()) {
-                logger.d("Token refresh returned empty access_token")
-                return null
+            response.accessToken?.takeIf { it.isNotBlank() }?.let { accessToken ->
+                SessionTokens(
+                    accessToken = accessToken,
+                    refreshToken = response.refreshToken?.takeIf { it.isNotBlank() }
+                        ?: tokens.refreshToken,
+                    expiresAt = tokenExpiryEpochSeconds(Clock.System.now().epochSeconds, response.expiresIn),
+                )
             }
-
-            response.refreshToken?.let { settingsRepository.putRefreshToken(it) }
-
-            val expiresIn = response.expiresIn
-            if (expiresIn != null && expiresIn > 0) {
-                val expiresAt = Clock.System.now().epochSeconds + expiresIn
-                settingsRepository.putTokenExpiresAt(expiresAt)
-            }
-
-            // Publish access last: observers may cancel/restart their requests
-            // on this emission, so the rotated refresh token must be saved first.
-            settingsRepository.putAccessToken(newAccessToken)
-
-            logger.d("Token refreshed successfully")
-            newAccessToken
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (e: Exception) {
-            logger.e("Token refresh failed: ${e::class.simpleName}")
+        } catch (error: Exception) {
+            // HTTP exceptions may include full bodies, credentials or URLs.
+            logger.e("Token refresh failed: ${error::class.simpleName}")
             null
         }
     }
 
-    suspend fun ensureValidToken(): String? = refreshMutex.withLock {
-        val accessToken = settingsRepository.getAccessToken()
-        if (accessToken.isNullOrEmpty()) return@withLock null
-
-        val expiresAt = settingsRepository.getTokenExpiresAt()
-        if (expiresAt != null) {
-            val now = Clock.System.now().epochSeconds
-            if (expiresAt - now < REFRESH_THRESHOLD_SECONDS) {
-                logger.d("Token expires soon (in ${expiresAt - now}s), proactive refresh")
-                return@withLock doRefresh() ?: accessToken
-            }
-        }
-
-        accessToken
-    }
-
-    suspend fun forceRefresh(): String? = refreshMutex.withLock {
-        doRefresh()
-    }
-
     val tokenRefreshPlugin = createClientPlugin("BoostyTokenRefresh") {
         on(Send) { request ->
-            val token = ensureValidToken()
-            if (!token.isNullOrEmpty()) {
+            // An absolute URL must never receive Boosty credentials. Authenticated API calls
+            // also disable redirects below, so credentials cannot cross an origin boundary.
+            request.headers.remove(HttpHeaders.Authorization)
+            if (!isBoostyApiUrl(request.url.build())) return@on proceed(request)
+
+            val snapshot = tokenManager.currentInSameSession(tokenManager.forRequest())
+            snapshot.tokens?.accessToken?.let { token ->
                 request.headers[HttpHeaders.Authorization] = "Bearer $token"
             }
-
             val originalCall = proceed(request)
-
+            tokenManager.currentInSameSession(snapshot)
             if (originalCall.response.status == HttpStatusCode.Unauthorized) {
-                val newToken = forceRefresh()
-                if (newToken != null) {
+                val refreshed = tokenManager.afterUnauthorized(snapshot)
+                val retrySession = refreshed?.let(tokenManager::currentInSameSession)
+                val newToken = retrySession?.tokens?.accessToken
+                if (retrySession != null && newToken != null) {
                     request.headers[HttpHeaders.Authorization] = "Bearer $newToken"
-                    proceed(request)
+                    proceed(request).also { tokenManager.currentInSameSession(retrySession) }
                 } else {
                     originalCall
                 }
@@ -160,9 +115,14 @@ internal fun buildBoostyHttpClient(
                 originalCall
             }
         }
+        onClose {
+            refreshScope.cancel()
+            refreshClient.close()
+        }
     }
 
-    return buildHttpClient(debugLog, json) {
+    return buildHttpClient(debugLog, json, engine = engine) {
+        followRedirects = false
         install(tokenRefreshPlugin)
         defaultRequest {
             url {
@@ -173,14 +133,23 @@ internal fun buildBoostyHttpClient(
     }
 }
 
+internal fun isBoostyApiUrl(url: Url): Boolean =
+    url.protocol == URLProtocol.HTTPS && url.host.equals("api.boosty.to", ignoreCase = true) &&
+        url.port == 443 && url.user == null && url.password == null
+
 /**
  * Клиент для phone-auth эндпоинтов Boosty: без Auth-плагина (чтобы не уходил пустой
  * `Authorization: Bearer`), с десктопным User-Agent и web-специфичными заголовками
  * (`X-App`, `X-Locale`, `Referer`, `Origin`, `Accept`), как шлёт браузер.
  * `X-From-Id` выставляется на уровне каждого запроса отдельно (это deviceId).
  */
-internal fun buildBoostyAuthHttpClient(debugLog: Boolean, json: Json) =
-    buildHttpClient(debugLog, json, userAgent = DESKTOP_USER_AGENT) {
+internal fun buildBoostyAuthHttpClient(
+    debugLog: Boolean,
+    json: Json,
+    engine: HttpClientEngine? = null,
+) = buildHttpClient(debugLog, json, userAgent = DESKTOP_USER_AGENT, engine = engine) {
+        // Verification codes, refresh tokens and candidate Bearer tokens stay on this origin.
+        followRedirects = false
         defaultRequest {
             url {
                 protocol = URLProtocol.HTTPS
@@ -209,9 +178,10 @@ internal fun buildHttpClient(
     isDebug: Boolean,
     json: Json,
     userAgent: String = USER_AGENT,
-    block: HttpClientConfig<HttpClientEngineConfig>.() -> Unit = {}
-): HttpClient =
-    HttpClient(HttpEngineFactory().createEngine(isDebug)) {
+    engine: HttpClientEngine? = null,
+    block: HttpClientConfig<*>.() -> Unit = {}
+): HttpClient {
+    val configure: HttpClientConfig<*>.() -> Unit = {
 
         expectSuccess = true
 
@@ -246,3 +216,7 @@ internal fun buildHttpClient(
         }
         block(this)
     }
+    // The factory overload owns its production engine; injected test engines stay caller-owned.
+    return if (engine == null) HttpClient(HttpEngineFactory().createEngine(isDebug), configure)
+    else HttpClient(engine, configure)
+}

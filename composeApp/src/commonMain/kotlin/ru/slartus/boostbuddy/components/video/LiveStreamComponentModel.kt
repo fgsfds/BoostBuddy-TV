@@ -1,14 +1,16 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.components.video
 
 import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import ru.slartus.boostbuddy.data.repositories.StreamRepository
 
 /**
@@ -20,17 +22,21 @@ internal class LiveStreamComponentModel(
     private val scope: CoroutineScope,
     private val streamRepository: StreamRepository,
     private val blogUrl: String,
+    private val isSessionActive: () -> Boolean,
 ) {
-    // Atomic чтобы stopHeartbeat был thread-safe: его могут вызвать одновременно
-    // handlePlaybackEnded (Main) и doOnDestroy (lifecycle thread), плюс external
-    // companion scope бежит на Dispatchers.Default.
+    // Stopping is idempotent across playback-ended and component destruction.
     private val heartbeatJob = atomic<Job?>(null)
-    private val heartbeatStopped = atomic(false)
+    private val heartbeatStopped = atomic(true)
+    private val stopJob = atomic<Job?>(null)
 
     fun startHeartbeat() {
+        if (heartbeatJob.value?.isActive == true || !isSessionActive()) return
+        heartbeatStopped.value = false
         heartbeatJob.getAndSet(null)?.cancel()
+        val pendingStop = stopJob.value
         heartbeatJob.value = scope.launch {
-            while (isActive) {
+            pendingStop?.join()
+            while (isActive && isSessionActive()) {
                 streamRepository.heartbeat(blogUrl, stop = false)
                 delay(HEARTBEAT_INTERVAL_MS)
             }
@@ -40,17 +46,19 @@ internal class LiveStreamComponentModel(
     fun stopHeartbeat() {
         if (!heartbeatStopped.compareAndSet(expect = false, update = true)) return
         heartbeatJob.getAndSet(null)?.cancel()
-        externalHeartbeatScope.launch(NonCancellable) {
-            streamRepository.heartbeat(blogUrl, stop = true)
+        if (!isSessionActive()) return
+        stopJob.value = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            withContext(NonCancellable) {
+                withTimeoutOrNull(STOP_TIMEOUT_MS) {
+                    if (isSessionActive()) streamRepository.heartbeat(blogUrl, stop = true)
+                }
+            }
         }
     }
 
     private companion object {
         private const val HEARTBEAT_INTERVAL_MS = 30_000L
 
-        // Live'ём scope-singleton'ом, чтобы stop-heartbeat пережил onDestroy
-        // компонента: heartbeat должен быть закрыт серверу до того как мы уйдём
-        // с экрана. Сам scope не отменяем — fire-and-forget с NonCancellable.
-        private val externalHeartbeatScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        private const val STOP_TIMEOUT_MS = 1_500L
     }
 }

@@ -1,10 +1,10 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.components.main
 
 import androidx.compose.runtime.Stable
 import com.arkivanov.decompose.ComponentContext
 import com.arkivanov.decompose.router.stack.StackNavigation
 import com.arkivanov.decompose.router.stack.bringToFront
-import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import ru.slartus.boostbuddy.components.BaseComponent
 import ru.slartus.boostbuddy.components.feed.FeedComponent
@@ -14,9 +14,6 @@ import ru.slartus.boostbuddy.components.subscribes.SubscribesComponent
 import ru.slartus.boostbuddy.components.subscribes.SubscribesComponentImpl
 import ru.slartus.boostbuddy.components.top_bar.TopBarComponent
 import ru.slartus.boostbuddy.components.top_bar.TopBarComponentImpl
-import ru.slartus.boostbuddy.data.Inject
-import ru.slartus.boostbuddy.data.repositories.SettingsRepository
-import ru.slartus.boostbuddy.utils.unauthorizedError
 
 @Stable
 interface MainComponent {
@@ -34,7 +31,6 @@ internal class MainComponentImpl(
     componentContext,
     Unit
 ), MainComponent {
-    private val settingsRepository by Inject.lazy<SettingsRepository>()
     private val navigation = StackNavigation<Config>()
     override val feedComponent: FeedComponent = feedComponent(componentContext)
     override val subscribesComponent: SubscribesComponent = subscribesComponent(componentContext)
@@ -46,17 +42,6 @@ internal class MainComponentImpl(
         onFilter = ::onFilter,
         onSearchQuery = ::onSearchQuery,
     )
-
-    init {
-        checkToken()
-    }
-
-    private fun checkToken() {
-        scope.launch {
-            if (settingsRepository.getAccessToken() == null)
-                unauthorizedError()
-        }
-    }
 
     private fun feedComponent(componentContext: ComponentContext): FeedComponent =
         FeedComponentImpl(componentContext)

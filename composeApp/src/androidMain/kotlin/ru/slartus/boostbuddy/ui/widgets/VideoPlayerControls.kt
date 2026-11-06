@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.ui.widgets
 
 import android.graphics.Color as PlatformColor
@@ -79,7 +80,6 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -128,6 +128,7 @@ private class JobHolder {
 @Composable
 internal fun VideoPlayerChrome(
     exoPlayer: ExoPlayer,
+    isPlayerActive: () -> Boolean,
     title: String,
     postTitle: String,
     playingPosition: Long,
@@ -180,7 +181,7 @@ internal fun VideoPlayerChrome(
     val seekFeedbackJobHolder = remember { JobHolder() }
 
     val applySeekTick by rememberUpdatedState<(Offset) -> Unit> { offset ->
-        if (isLive) return@rememberUpdatedState
+        if (isLive || !isPlayerActive()) return@rememberUpdatedState
         val width = playerSize.width
         if (width <= 0) return@rememberUpdatedState
         val direction = if (offset.x > width / 2f) {
@@ -205,7 +206,7 @@ internal fun VideoPlayerChrome(
             SeekDirection.FORWARD -> exoPlayer.currentPosition + seekMs
             SeekDirection.BACKWARD -> exoPlayer.currentPosition - seekMs
         }
-        exoPlayer.seekTo(target.coerceAtLeast(0L))
+        exoPlayer.seekToClamped(target)
         controllerState.hide()
 
         seekFeedbackJobHolder.job?.cancel()
@@ -223,9 +224,10 @@ internal fun VideoPlayerChrome(
     Box {
         AndroidView(
             modifier = Modifier
-                .focusable()
                 .focusRequester(focusRequester)
+                .focusable()
                 .onPlayerKeyEvent(
+                    isPlayerActive = isPlayerActive,
                     onUpClick = {
                         controllerState.showWithAutoHide()
                     },
@@ -238,7 +240,7 @@ internal fun VideoPlayerChrome(
                         exoPlayer.startPlayer()
                     },
                     onPlayPauseClick = {
-                        if (exoPlayer.isPlaying) {
+                        if (exoPlayer.playWhenReady) {
                             controllerState.show()
                             exoPlayer.pausePlayer()
                         } else {
@@ -249,7 +251,7 @@ internal fun VideoPlayerChrome(
                     onLeftClick = { longPress ->
                         if (!isLive) {
                             val seekMultiplier = seekState.calcSeekMultiplier(longPress)
-                            exoPlayer.seekTo(
+                            exoPlayer.seekToClamped(
                                 exoPlayer.currentPosition - (SEEK_INCREMENT.toLong(
                                     DurationUnit.MILLISECONDS
                                 ) * seekMultiplier).toLong()
@@ -260,7 +262,7 @@ internal fun VideoPlayerChrome(
                     onRightClick = { longPress ->
                         if (!isLive) {
                             val seekMultiplier = seekState.calcSeekMultiplier(longPress)
-                            exoPlayer.seekTo(
+                            exoPlayer.seekToClamped(
                                 exoPlayer.currentPosition + (SEEK_INCREMENT.toLong(
                                     DurationUnit.MILLISECONDS
                                 ) * seekMultiplier).toLong()
@@ -274,7 +276,8 @@ internal fun VideoPlayerChrome(
                 .then(
                     if (isAtv) {
                         Modifier.noRippleClickable {
-                            if (exoPlayer.isPlaying) {
+                            if (!isPlayerActive()) return@noRippleClickable
+                            if (exoPlayer.playWhenReady) {
                                 controllerState.show()
                                 exoPlayer.pausePlayer()
                             } else {
@@ -392,7 +395,10 @@ internal fun VideoPlayerChrome(
                     setShowRewindButton(false)
                     player = exoPlayer
                 }
-            }
+            },
+            update = { it.player = exoPlayer },
+            onReset = null,
+            onRelease = { it.player = null },
         )
 
         AnimatedVisibility(
@@ -459,7 +465,8 @@ internal fun VideoPlayerChrome(
                         .then(
                             if (!isAtv) {
                                 Modifier.noRippleClickable {
-                                    if (exoPlayer.isPlaying) {
+                                    if (!isPlayerActive()) return@noRippleClickable
+                                    if (exoPlayer.playWhenReady) {
                                         exoPlayer.pausePlayer()
                                         controllerState.show()
                                     } else {
@@ -471,7 +478,7 @@ internal fun VideoPlayerChrome(
                                 Modifier
                             }
                         ),
-                    playing = exoPlayer.isPlaying,
+                    playing = exoPlayer.playWhenReady,
                 )
 
                 PlayerControllerView(
@@ -486,14 +493,12 @@ internal fun VideoPlayerChrome(
                         changePositionJob?.cancel()
                         val autoHideWasActive = controllerState.isAutoHideActive
 
-                        changePositionJob = coroutineScope.launch(SupervisorJob()) {
-                            runCatching {
-                                if (autoHideWasActive) {
-                                    controllerState.scheduleAutoHide()
-                                }
-                                delay(500)
-                                exoPlayer.seekTo(newPosition)
+                        changePositionJob = coroutineScope.launch {
+                            if (autoHideWasActive) {
+                                controllerState.scheduleAutoHide()
                             }
+                            delay(500)
+                            if (isPlayerActive()) exoPlayer.seekToClamped(newPosition)
                         }
                     }
                 )
@@ -564,7 +569,7 @@ private fun VodProgress(
     }
     Slider(
         modifier = Modifier.fillMaxWidth(),
-        value = position,
+        value = position.coerceIn(valueRange.start, valueRange.endInclusive),
         valueRange = valueRange,
         onValueChange = {
             position = it
@@ -766,6 +771,7 @@ private fun PlayerQualityButton(
 }
 
 private fun Modifier.onPlayerKeyEvent(
+    isPlayerActive: () -> Boolean,
     onUpClick: (longPress: Boolean) -> Unit,
     onPauseClick: (longPress: Boolean) -> Unit,
     onPlayClick: (longPress: Boolean) -> Unit,
@@ -778,6 +784,7 @@ private fun Modifier.onPlayerKeyEvent(
     var longPress by remember { mutableStateOf(false) }
 
     onKeyEvent { keyEvent ->
+        if (!isPlayerActive()) return@onKeyEvent false
         if (!isOwnKeyCode(keyEvent)) return@onKeyEvent false
 
         if (keyEvent.nativeKeyEvent.action == KeyEvent.ACTION_DOWN) {
@@ -894,11 +901,9 @@ private class VideoControllerState(
 
     fun scheduleAutoHide() {
         hideJob?.cancel()
-        hideJob = scope.launch(SupervisorJob()) {
-            runCatching {
-                delay(HIDE_CONTROLLER_DELAY)
-                isVisible = false
-            }
+        hideJob = scope.launch {
+            delay(HIDE_CONTROLLER_DELAY)
+            isVisible = false
         }
     }
 }

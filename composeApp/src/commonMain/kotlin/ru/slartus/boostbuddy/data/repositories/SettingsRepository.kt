@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.data.repositories
 
 import com.russhwolf.settings.ExperimentalSettingsApi
@@ -6,29 +7,121 @@ import com.russhwolf.settings.coroutines.getBooleanFlow
 import com.russhwolf.settings.coroutines.getBooleanOrNullFlow
 import com.russhwolf.settings.coroutines.getFloatFlow
 import com.russhwolf.settings.coroutines.getStringOrNullFlow
-import com.russhwolf.settings.coroutines.getStringOrNullStateFlow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import ru.slartus.boostbuddy.data.repositories.models.VideoQuality
 import kotlin.random.Random
 
 @OptIn(ExperimentalSettingsApi::class)
 internal class SettingsRepository(
     private val settings: ObservableSettings,
-    private val coroutineScope: CoroutineScope,
+    coroutineScope: CoroutineScope,
 ) {
     private val locker = Mutex()
+    private val sessionState = MutableStateFlow(
+        SessionSnapshot(revision = 0L, sessionId = 0L, tokens = readStoredSession())
+    )
 
-    val tokenFlow: StateFlow<String?>
-        get() = settings.getStringOrNullStateFlow(coroutineScope, ACCESS_TOKEN_KEY)
+    /** One atomic snapshot; rotating tokens does not change the account/session identity. */
+    val sessionFlow: StateFlow<SessionSnapshot> = sessionState.asStateFlow()
+    val tokenFlow: StateFlow<String?> = sessionFlow.map { it.tokens?.accessToken }
+        .stateIn(coroutineScope, SharingStarted.Eagerly, sessionState.value.tokens?.accessToken)
+
+    fun sessionSnapshot(): SessionSnapshot = sessionState.value
+
+    /** Commit a validated login only if the session in which it started still exists. */
+    suspend fun replaceSession(
+        tokens: SessionTokens,
+        expectedRevision: Long? = null,
+    ): SessionSnapshot? = changeSession(tokens, expectedRevision, replaceIdentity = true)
+
+    /** A late refresh must never restore a logged-out session or overwrite another login. */
+    suspend fun updateSession(expectedRevision: Long, tokens: SessionTokens): SessionSnapshot? =
+        changeSession(tokens, expectedRevision, replaceIdentity = false)
+
+    suspend fun clearSession(
+        expectedRevision: Long? = null,
+        expectedSessionId: Long? = null,
+    ): SessionSnapshot? = changeSession(
+        null, expectedRevision, replaceIdentity = true, expectedSessionId = expectedSessionId,
+    )
+
+    private suspend fun changeSession(
+        tokens: SessionTokens?,
+        expectedRevision: Long?,
+        replaceIdentity: Boolean,
+        expectedSessionId: Long? = null,
+    ): SessionSnapshot? {
+        currentCoroutineContext().ensureActive()
+        // A credential transaction cannot be interrupted between durable storage and publication.
+        // This lock covers local settings only, never a network request.
+        return withContext(NonCancellable + Dispatchers.IO) {
+            locker.withLock {
+                val previous = sessionState.value
+                if (expectedRevision != null && previous.revision != expectedRevision) {
+                    return@withLock null
+                }
+                if (expectedSessionId != null && previous.sessionId != expectedSessionId) {
+                    return@withLock null
+                }
+                val next = SessionSnapshot(
+                    revision = previous.revision + 1,
+                    sessionId = previous.sessionId + if (replaceIdentity) 1 else 0,
+                    tokens = tokens,
+                )
+                // One record prevents mixed access/refresh tokens after cancellation or restart.
+                // A stored null also prevents stale legacy keys from reviving a logged-out session.
+                settings.putString(SESSION_KEY, sessionJson.encodeToString(tokens))
+                sessionState.value = next
+                next
+            }
+        }
+    }
+
+    private fun readStoredSession(): SessionTokens? {
+        val record = settings.getStringOrNull(SESSION_KEY)
+        if (record != null) {
+            // Fail closed for a corrupt record; never fall back to stale legacy credentials.
+            val tokens = runCatching { sessionJson.decodeFromString<SessionTokens?>(record) }.getOrNull()
+            removeLegacySession()
+            return tokens
+        }
+        val accessToken = settings.getStringOrNull(ACCESS_TOKEN_KEY)?.takeIf { it.isNotBlank() }
+        val legacy = accessToken?.let {
+            SessionTokens(
+                accessToken = it,
+                refreshToken = settings.getStringOrNull(REFRESH_TOKEN_KEY)?.takeIf { token -> token.isNotBlank() },
+                expiresAt = settings.getLongOrNull(TOKEN_EXPIRES_AT_KEY),
+            )
+        }
+        settings.putString(SESSION_KEY, sessionJson.encodeToString(legacy))
+        removeLegacySession()
+        return legacy
+    }
+
+    private fun removeLegacySession() {
+        settings.remove(ACCESS_TOKEN_KEY)
+        settings.remove(REFRESH_TOKEN_KEY)
+        settings.remove(TOKEN_EXPIRES_AT_KEY)
+    }
 
     val appSettingsFlow: Flow<AppSettings>
         get() = combine(
@@ -85,32 +178,7 @@ internal class SettingsRepository(
         putBoolean(DEBUG_LOG, value)
     }
 
-    suspend fun putAccessToken(value: String?) = withContext(Dispatchers.IO) {
-        if (value == null)
-            remove(ACCESS_TOKEN_KEY)
-        else
-            putString(ACCESS_TOKEN_KEY, value)
-    }
-
-    suspend fun getAccessToken(): String? = getString(ACCESS_TOKEN_KEY)
-
-    suspend fun putRefreshToken(value: String?) = withContext(Dispatchers.IO) {
-        if (value == null)
-            remove(REFRESH_TOKEN_KEY)
-        else
-            putString(REFRESH_TOKEN_KEY, value)
-    }
-
-    suspend fun getRefreshToken(): String? = getString(REFRESH_TOKEN_KEY)
-
-    suspend fun putTokenExpiresAt(value: Long?) = withContext(Dispatchers.IO) {
-        if (value == null)
-            remove(TOKEN_EXPIRES_AT_KEY)
-        else
-            putLong(TOKEN_EXPIRES_AT_KEY, value)
-    }
-
-    suspend fun getTokenExpiresAt(): Long? = getLong(TOKEN_EXPIRES_AT_KEY)
+    suspend fun getAccessToken(): String? = sessionSnapshot().tokens?.accessToken
 
     suspend fun getOrCreateDeviceId(): String = withContext(Dispatchers.IO) {
         locker.withLock {
@@ -210,6 +278,8 @@ internal class SettingsRepository(
     }
 
     private companion object {
+        val sessionJson = Json { ignoreUnknownKeys = true }
+        const val SESSION_KEY = "auth_session_v1"
         const val KEY_DONATION_PROMPT_VERSION = "KEY_DONATION_PROMPT_VERSION"
         const val ACCESS_TOKEN_KEY = "access_token"
         const val REFRESH_TOKEN_KEY = "refresh_token"
@@ -224,6 +294,28 @@ internal class SettingsRepository(
         const val DEFAULT_PLAYBACK_SPEED = 1f
     }
 }
+
+/** Credentials deliberately redact their generated diagnostic representation. */
+@Serializable
+internal data class SessionTokens(
+    val accessToken: String,
+    val refreshToken: String? = null,
+    val expiresAt: Long? = null,
+) {
+    init { require(accessToken.isNotBlank()) { "Empty access token" } }
+    override fun toString(): String = "SessionTokens(redacted)"
+}
+
+internal data class SessionSnapshot(
+    val revision: Long,
+    val sessionId: Long,
+    val tokens: SessionTokens?,
+) {
+    val isAuthenticated: Boolean get() = tokens != null
+}
+
+internal fun tokenExpiryEpochSeconds(now: Long, expiresInSeconds: Long?): Long? =
+    expiresInSeconds?.takeIf { it > 0 && now <= Long.MAX_VALUE - it }?.let { now + it }
 
 private fun String?.toVideoQualityOrNull(): VideoQuality? =
     this?.let { name -> VideoQuality.entries.firstOrNull { it.name == name } }

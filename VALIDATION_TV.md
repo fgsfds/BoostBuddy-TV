@@ -1,98 +1,120 @@
-# BoostBuddy TV validation
+# BoostBuddy TV validation — 1.16.0-tv.2
 
-Validation date: **2026-11-06**. Upstream base: BoostBuddy **1.16.0**, commit `b9acb6c2cde4f37907e70bf166a2f27c7d57c322`.
+Validation date: **2026-11-06**. Review baseline: `b73674c913cc71fc2db5db499263adb45afeed0f` (`1.16.0-tv.1`). Upstream base: BoostBuddy **1.16.0**, commit `b9acb6c2cde4f37907e70bf166a2f27c7d57c322`.
 
-## Build correction and scope
+The [code-review report](docs/CODE_REVIEW_TV.md) explains the findings and corrections. This record distinguishes automated coverage, offline emulator checks, and account/device checks that remain outstanding.
 
-An earlier APK assembled from the working build tree contained stale compiled classes and crashed at startup. **That APK is superseded.** The current validation used a fresh source copy, isolated build outputs, and no build cache. Its normal TV activity and offline preview activity then launched and rendered successfully, with no Android runtime fatal exceptions observed during the capture session.
+## Clean build and automated checks
 
-The APK identity and digest below refer to this **clean local debug build**, which includes the debug-only offline screenshot fixture. Later GitHub Actions builds have their own commit, signing certificate, and checksum in their artifact's `build-info.json` and `SHA256SUMS`.
+The final source was copied to an isolated build directory and built with **JDK 17, Android SDK 35, and Gradle 8.14.3**. Build outputs were cleaned, build-cache reuse was disabled, and the compiled source was compared with the working tree before publication. The equivalent repository command is:
 
-## Automated checks
+```sh
+./gradlew --no-build-cache :composeApp:clean :composeApp:assembleDebug :composeApp:testDebugUnitTest
+```
 
-| Check | Result |
+**Result: APK assembly passed; 84 tests passed, with 0 failures, 0 errors, and 0 skipped.** This adds 66 regression tests to the previous 18. The final local test reports were recorded at **13:24:34–13:24:36 UTC**.
+
+| Coverage | Result |
 | --- | --- |
-| Fresh Android debug APK assembly | Passed with JDK 17, Android SDK 35, and Gradle 8.14.3; private outputs and no build cache. |
-| `:composeApp:testDebugUnitTest` | **18 tests, 0 failures, 0 errors, 0 skipped.** |
-| International phone normalization | 4 tests passed. |
-| Subscription pagination | 8 tests passed. |
-| TV video-card mapping | 6 tests passed. |
-| APK signature verification | `apksigner verify --verbose` passed; APK Signature Scheme v2 verified. |
-| Package and launcher inspection | `aapt dump badging` confirmed the fork package, version, SDK levels, and TV entry point. |
-| Whitespace / patch integrity | `git diff --check` passed. |
+| Login validation, consumed-code retry, and cancellation | 4 passed |
+| International phone normalization | 4 passed |
+| Feed sessions, polling, refresh, and pagination | 7 passed |
+| TV focus ownership, restoration, and search drafts | 13 passed |
+| TV video mapping, availability, and progress | 7 passed |
+| Synchronous stop/release and stale-player ownership | 3 passed |
+| Fresh playback URLs, access checks, and stream identity | 5 passed |
+| Final position, failed-save retry, cancellation, and forced zero | 9 passed |
+| HTTP authentication retries, origin restrictions, and redirects | 3 passed |
+| Real loopback HTTPS certificates and hostname checks | 4 passed |
+| Concurrent refresh, logout/account replacement, caller cancellation | 5 passed |
+| Credential persistence, migration, corruption, and revision guards | 6 passed |
+| Subscription pagination and deduplication | 8 passed |
+| Trusted website origin validation | 2 passed |
+| Handler identity, dispatch order, and removal | 4 passed |
 
-The fresh test reports were recorded at **11:07:47 UTC** on 2026-11-06. Tests use synthetic data and cover international calling codes, more than 30 subscriptions, malformed/duplicate rows, server page sizes, stale totals, repeated/ignored offsets, bounded pagination, multi-video posts, stable identities, locked teasers, processing videos, duration, and progress.
+The HTTPS tests use an actual local TLS server and the Android HTTP engine. They require rejection of untrusted certificates in both debug and release configurations, rejection of a trusted certificate for the wrong hostname, and success for a trusted matching certificate. Authentication tests use a mock HTTP engine; other tests use synthetic data and controlled coroutine scheduling. These are JVM/component tests, not a live Boosty integration suite or instrumented Compose UI tests.
 
-Feed refresh and token-renewal interactions also received source review. Refresh invalidates its generation before suspending; pagination rejects stale generations after token retrieval. The rotated refresh token and expiry are saved before publishing the new access token. Those concurrency paths were reviewed in source, not exercised against a live Boosty session.
+Additional checks:
 
-The build retains upstream deprecation and Kotlin Multiplatform warnings. The iOS targets were not built on this Linux host.
+- `apksigner verify --verbose` passed; APK Signature Scheme v2 verified.
+- APK metadata confirmed package `ru.slartus.boostbuddy.tvfork`, version `1.16.0-tv.2`, code 90, minimum SDK 24, target SDK 34, and compile SDK 35.
+- `git diff --check` passed.
+- The source changes received independent reviews of authentication/session behavior, feed/playback behavior, and TV navigation; lifecycle cleanup and initial focus were corrected after those reviews.
+
+Upstream deprecation and Kotlin Multiplatform warnings remain. The inherited iOS targets were not built on this Linux host. The earlier stale-output APK from the first implementation cycle remains superseded; this review used isolated clean outputs again.
 
 ## Emulator runtime checks
 
 Device: **Android TV 10 / API 29, x86, 1280 × 720 pixels, 213 dpi, software emulation**.
 
+The following were observed during the review cycle using the normal activity or the debug-only offline fixture:
+
 | Check | Observed result |
 | --- | --- |
-| Normal `TvAppActivity` launch | Native sign-in form rendered; phone-number field remained empty and the keyboard was dismissed for capture. |
-| Offline feed preview | Actual TV sidebar and video-grid components rendered using fictional local fixtures. |
-| Video-card focus | D-pad movement from the first card to the second was checked in Android's UI hierarchy. |
-| Sidebar navigation | Left returned focus to the sidebar. |
-| Subscriptions navigation | Down/Center opened Subscriptions; the first creator's focus was confirmed in the UI hierarchy. |
-| Runtime stability in this session | No Android runtime fatal exceptions after the clean build. |
-| Emulator shutdown | Graceful shutdown; capture session exited with status 0. |
+| Normal `TvAppActivity` launch | Native sign-in form rendered with an empty phone-number field. |
+| Login remote focus | D-pad Down moved from the phone field to **Получить код**. |
+| Empty-phone validation | Center on **Получить код** displayed local validation, with focus on **Понятно**; no verification-code request was sent. |
+| Offline feed preview | Actual sidebar/video-grid components rendered with fictional local fixtures. |
+| Explicit grid entry and movement | Right entered content from the sidebar; subsequent Right moved to the next video card, confirmed in Android's UI hierarchy. |
+| Sidebar and subscriptions | Left returned to the sidebar; Down/Center opened Subscriptions and focused the first creator. |
+| Search entry | Selecting Search focused its native text field; a local draft was entered successfully. |
 
-The three screenshots are unedited `adb exec-out screencap -p` captures. The feed and subscriptions captures visibly display **DEMO DATA · OFFLINE**. Their creators, thumbnails, avatars, durations, dates, and progress values are fixed local fixtures; they do not show a connected account. Playback and refresh actions in that fixture are inert.
+The first candidate exposed an initial-focus problem: Android's automatic menu focus cancelled the pending grid/bookmark restoration. The correction distinguishes automatic initial focus from explicit remote input and has two dedicated regression tests. Search-draft round-trip behavior is covered by the helper tests; an intermediate emulator hierarchy capture timed out and is not counted as a completed runtime round-trip check.
+
+The exact final APK identified below was then installed successfully on a freshly wiped emulator using non-streaming installation. The normal TV activity reached `RESUMED`, and Android recorded its `Displayed` event after 49.652 seconds. The crash buffer was empty. Screenshot and UI-hierarchy capture timed out, so **initial first-card focus on the final APK remains runtime-unverified**. The captured general log was partial and also contained ANRs in Google keyboard/background services; that suggests emulator performance trouble but does not establish the cause of the capture failures. The bounded session stopped the emulator and ADB server afterward. No further runtime result is inferred from those incomplete captures.
+
+### Screenshot provenance
+
+The README's three screenshots remain the unedited `1.16.0-tv.1` captures of the same screen layouts. They are not relabelled as new screenshots of `tv.2`. Feed/subscriptions images visibly display **DEMO DATA · OFFLINE**; their creators, thumbnails, durations, dates, and progress are fictional fixtures. Playback and refresh actions in that fixture are inert.
 
 | Capture | Content |
 | --- | --- |
 | [tv-login.png](docs/screenshots/tv-login.png) | Normal native login, empty phone-number field. |
-| [tv-feed-demo.png](docs/screenshots/tv-feed-demo.png) | Real feed components with offline demo data. |
-| [tv-subscriptions-demo.png](docs/screenshots/tv-subscriptions-demo.png) | Real creator directory with offline demo data. |
+| [tv-feed-demo.png](docs/screenshots/tv-feed-demo.png) | Actual feed components with offline demo data. |
+| [tv-subscriptions-demo.png](docs/screenshots/tv-subscriptions-demo.png) | Actual creator directory with offline demo data. |
 
-See [screenshot provenance and reproduction steps](docs/screenshots/README.md). The fixture activity is debug-only and excluded from release builds.
+See [screenshot provenance and reproduction steps](docs/screenshots/README.md). The fixture is debug-only and excluded from release builds.
 
 ## Validated local APK
 
 | Property | Value |
 | --- | --- |
 | Application ID | `ru.slartus.boostbuddy.tvfork` |
-| Version | `1.16.0-tv.1` / version code 89 |
+| Version | `1.16.0-tv.2` / version code 90 |
 | Launcher label | BoostBuddy TV |
 | TV activity | `ru.slartus.boostbuddy.TvAppActivity` |
 | Android SDK levels | Minimum 24, target 34, compile 35 |
 | Build | Clean local debug APK with offline preview support |
 | Signing | Local Android debug certificate; APK Signature Scheme v2 verified |
-| Size | **28,602,830 bytes** |
-| Network/SDK changes | AppMetrica SDK and package-install permission removed |
+| Size | **28,651,982 bytes** |
+| Network/SDK properties | Normal TLS verification; no AppMetrica SDK or package-install permission |
 
-SHA-256:
+SHA-256 of this local APK:
 
 ```text
-6035e2d89f10f0bdd19c4dd01ff53ca6851f28f12e8cc4bdbe88b358a511512a
+7cf09837c64cf601b4248f59a27355381d8c263290a62817d1a9dbf2d7243ae6
 ```
 
-This replaces the earlier 28,917,113-byte APK and its checksum. A CI artifact's digest will differ; verify it against that artifact's accompanying `SHA256SUMS`.
+A GitHub Actions APK has its own checksum and signing certificate. Verify it against the `SHA256SUMS` included in that artifact, rather than this local-build digest.
 
 ## GitHub Actions coverage
 
-The [Build TV APK workflow](.github/workflows/build-tv.yml) is configured for every branch push, pull request, and manual dispatch. It assembles the debug APK and runs the unit tests before uploading an APK. APK filenames include the app version, version code, and built commit. The archive contains a checksum, build metadata, and installation notes; test/build reports are a separate artifact.
+The [Build TV APK workflow](.github/workflows/build-tv.yml) runs for every branch push, pull request, and manual dispatch. It assembles the debug APK and runs `:composeApp:testDebugUnitTest` before uploading an APK. APK filenames include the app version, version code, and built commit. The archive contains a checksum, `build-info.json`, and installation notes; test/build reports are a separate artifact.
 
-Both artifact types are retained for **14 days**, subject to repository policy. Each fresh runner uses an ephemeral debug key, so later CI APKs may require uninstalling a previously installed build. A persistent owner-controlled release key is needed for stable in-place updates. See the [installation and signing guide](README_TV.md).
+Both artifact types are retained for **14 days**, subject to repository policy. Fresh runners use ephemeral debug keys, so a later CI APK may require uninstalling a previous build. A persistent owner-controlled release key is needed for stable in-place updates. See the [installation and signing guide](README_TV.md).
 
-This document records the local build and emulator session. Consult the [Actions run](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml) corresponding to a commit for that CI build's result; the local checks do not imply that later runs passed.
+Consult the [Actions run](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml) for the desired commit to see that CI build's actual result. This local validation does not imply that later builds passed.
 
 ## Account and hardware coverage
 
-**No live account sign-in, verification-code request, or video playback was attempted.** No user token, paid-content session, physical TV, or hardware-decoding test was used. Token renewal against Boosty, actual subscription/feed responses, account entitlements, and signed media URL recovery still require an account/device smoke test.
+**No live account sign-in, verification-code request, or video playback was attempted.** No user token, paid-content session, physical TV, or hardware-decoding test was used. Tests for refresh, access checks, media URL recovery, and playback lifecycle establish local behavior with controlled inputs; they do not establish compatibility with every current Boosty response or TV decoder.
 
-The offline navigation checks establish that the tested components render and respond to the remote in the emulator. They do not establish successful authentication or playback. The validated APK is a debug build for sideload testing, not a store release.
+Remaining account/device smoke checks:
 
-## Remaining device smoke checks
-
-1. Navigate the normal login form using only the remote, then sign in with a number linked to an existing Boosty account.
-2. Open a real creator, scroll to a later video, play it, seek, change quality, and return with Back.
-3. Confirm the focused video and grid position are restored after actual playback.
+1. Sign in through the native form with a phone number linked to an existing Boosty account.
+2. Open a real creator, scroll to a later video, play it, seek, change quality, pause/resume, and background/return to the app.
+3. Press Back and confirm the focused video and grid position are restored after actual playback.
 4. Search real posts, refresh the feed, and sign out through the sidebar.
 5. Where available, check more than 30 subscriptions, a text-only page between videos, an inaccessible post, token renewal, and an expired media URL.
 
-These account/hardware checks remain follow-up work; they are not claimed as completed.
+The APK is a debug build for sideload testing, not a store release.

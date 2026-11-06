@@ -1,3 +1,4 @@
+// Modified for BoostBuddy TV on 2026-11-06; see TV_FORK_CHANGES.md.
 package ru.slartus.boostbuddy.ui.tv
 
 import androidx.compose.animation.core.animateFloatAsState
@@ -43,10 +44,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
@@ -81,6 +80,7 @@ import ru.slartus.boostbuddy.components.common.ProgressState
 import ru.slartus.boostbuddy.components.feed.FeedPostItem
 import ru.slartus.boostbuddy.components.tv.TvVideoCard
 import ru.slartus.boostbuddy.components.tv.formatVideoDuration
+import ru.slartus.boostbuddy.components.tv.restoredTvGridIndex
 import ru.slartus.boostbuddy.ui.common.keyboardAsState
 
 @Composable
@@ -106,8 +106,9 @@ internal fun TvVideoBrowseContent(
     onPlay: (TvVideoCard) -> Unit,
     avatarUrl: String? = null,
 ) {
-    var unavailableVideo by remember { mutableStateOf<TvVideoCard?>(null) }
+    var unavailableVideo by remember(routeKey) { mutableStateOf<TvVideoCard?>(null) }
     val refreshRequester = remember { FocusRequester() }
+    val focusSearch = searchVisible && (searchQuery.isBlank() || browseState.searchFocusRequested)
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(bottom = 18.dp), verticalAlignment = Alignment.CenterVertically) {
             if (avatarUrl != null) {
@@ -128,7 +129,7 @@ internal fun TvVideoBrowseContent(
             )
         }
         if (searchVisible) {
-            TvSearchBar(searchQuery, focus, onSearch)
+            TvSearchBar(searchQuery, browseState, focus, focusSearch, onSearch)
             Spacer(Modifier.height(18.dp))
         }
         if (searchVisible && searchQuery.isBlank()) {
@@ -138,14 +139,15 @@ internal fun TvVideoBrowseContent(
                 icon = Icons.Rounded.Search,
             )
         } else when (progress) {
-            ProgressState.Init, ProgressState.Loading -> TvLoadingPanel("Загружаем видео…")
+            ProgressState.Init, ProgressState.Loading ->
+                TvLoadingPanel("Загружаем видео…", focus.takeUnless { focusSearch }, refreshRequester)
             is ProgressState.Error -> TvStatusPanel(
                 title = "Не удалось загрузить видео",
                 message = progress.description,
                 icon = Icons.Rounded.WarningAmber,
                 action = "Повторить",
-                onAction = onRetry,
-                focus = focus,
+                onAction = { focus.enterContent(allowHeaderFallback = false); onRetry() },
+                focus = focus.takeUnless { focusSearch },
             )
             ProgressState.Loaded -> TvVideoGrid(
                 routeKey = routeKey,
@@ -156,6 +158,8 @@ internal fun TvVideoBrowseContent(
                 isRefreshing = isRefreshing,
                 browseState = browseState,
                 focus = focus,
+                restoreFocus = !focusSearch,
+                fallbackRequester = refreshRequester,
                 onRefresh = onRefresh,
                 onLoadMore = onLoadMore,
                 onRetryPage = onRetryPage,
@@ -166,37 +170,58 @@ internal fun TvVideoBrowseContent(
         }
     }
     unavailableVideo?.let { card ->
-        TvUnavailableDialog(card, onDismiss = { unavailableVideo = null; focus.enterContent() })
+        TvUnavailableDialog(card, onDismiss = { unavailableVideo = null; focus.enterContent(allowHeaderFallback = false) })
     }
 }
 
 @Composable
-private fun TvSearchBar(query: String, focus: TvContentFocus, onSearch: (String) -> Unit) {
-    var draft by rememberSaveable { mutableStateOf(query) }
+private fun TvSearchBar(
+    query: String,
+    browseState: TvBrowseState,
+    focus: TvContentFocus,
+    requestFocus: Boolean,
+    onSearch: (String) -> Unit,
+) {
     val requester = remember { FocusRequester() }
     val findRequester = remember { FocusRequester() }
+    var fieldHasFocus by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val isKeyboardOpen by keyboardAsState()
-    LaunchedEffect(query) { draft = query }
-    val submit = {
-        val value = draft.trim()
-        if (value.isNotBlank()) {
-            keyboard?.hide()
-            onSearch(value)
-            focus.enterContent()
-        }
+    LaunchedEffect(query) { browseState.searchDraft = browseState.searchDraft.synchronize(query) }
+    LaunchedEffect(isKeyboardOpen, fieldHasFocus) {
+        if (isKeyboardOpen && fieldHasFocus) focus.contentFocused()
     }
-    LaunchedEffect(focus.request, query.isBlank()) {
-        if (query.isBlank() && !focus.sidebarHasFocus) {
-            requestTvFocus({ requester }, { !focus.sidebarHasFocus })
+    val submit = {
+        val value = browseState.searchDraft.submittedQuery
+        keyboard?.hide()
+        browseState.searchFocusRequested = value.isBlank()
+        onSearch(value)
+        focus.enterContent(allowHeaderFallback = false)
+    }
+    LaunchedEffect(focus.request, requestFocus) {
+        val request = focus.request
+        if (requestFocus && focus.canRequestContent(request)) {
+            if (requestTvFocus({ requester }, { focus.canRequestContent(request) })) {
+                focus.completeContentRequest(request)
+                browseState.searchFocusRequested = false
+            }
         }
     }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         OutlinedTextField(
-            value = draft,
-            onValueChange = { draft = it },
-            modifier = Modifier.weight(1f).focusRequester(requester).onFocusChanged { if (it.isFocused) focus.contentFocused() }
+            value = browseState.searchDraft.text,
+            onValueChange = {
+                browseState.searchDraft = browseState.searchDraft.copy(text = it)
+                focus.contentFocused()
+            },
+            modifier = Modifier.weight(1f).focusRequester(requester).onFocusChanged {
+                fieldHasFocus = it.isFocused
+                if (it.isFocused) {
+                    focus.contentFocused()
+                    browseState.searchFocusRequested = false
+                }
+            }
                 .onPreviewKeyEvent { event ->
                     if (!isKeyboardOpen) {
                         // With the keyboard closed, remote arrows leave the text caret.
@@ -213,6 +238,9 @@ private fun TvSearchBar(query: String, focus: TvContentFocus, onSearch: (String)
                         if (navigate != null) {
                             if (event.type == KeyEventType.KeyDown) navigate()
                             return@onPreviewKeyEvent true
+                        }
+                        if (event.key == Key.DirectionCenter && event.type == KeyEventType.KeyDown) {
+                            focus.contentFocused()
                         }
                     }
                     if (event.key == Key.Enter || event.key == Key.NumPadEnter) {
@@ -254,6 +282,8 @@ private fun TvVideoGrid(
     isRefreshing: Boolean,
     browseState: TvBrowseState,
     focus: TvContentFocus,
+    restoreFocus: Boolean,
+    fallbackRequester: FocusRequester,
     onRefresh: () -> Unit,
     onLoadMore: () -> Unit,
     onRetryPage: () -> Unit,
@@ -262,7 +292,7 @@ private fun TvVideoGrid(
     val bookmark = remember(routeKey) { browseState.bookmark(routeKey) }
     val grid = remember(routeKey) { LazyGridState(bookmark.index, bookmark.offset) }
     val requesters = remember(routeKey) { mutableMapOf<String, FocusRequester>() }
-    var handledFocusRequest by remember(routeKey) { mutableIntStateOf(-1) }
+    val keys = remember(cards) { cards.map { it.key } }
     var lastAutoPage by remember(routeKey) { mutableStateOf<String?>(null) }
     val loadingMore = items.lastOrNull() is FeedPostItem.LoadingItem
     val pageError = items.lastOrNull() as? FeedPostItem.ErrorItem
@@ -277,13 +307,22 @@ private fun TvVideoGrid(
         snapshotFlow { grid.firstVisibleItemIndex to grid.firstVisibleItemScrollOffset }
             .distinctUntilChanged().collect { (index, offset) -> bookmark.index = index; bookmark.offset = offset }
     }
-    LaunchedEffect(routeKey, focus.request, cards.isNotEmpty()) {
-        if (cards.isNotEmpty() && !focus.sidebarHasFocus && handledFocusRequest != focus.request) {
-            val index = cards.indexOfFirst { it.key == bookmark.focusedKey }.takeIf { it >= 0 } ?: 0
-            val key = cards[index].key
-            withFrameNanos { }
-            if (grid.layoutInfo.visibleItemsInfo.none { it.key == key }) grid.scrollToItem(index)
-            if (requestTvFocus({ requesters[key] }, { !focus.sidebarHasFocus })) handledFocusRequest = focus.request
+    LaunchedEffect(routeKey, focus.request, keys, restoreFocus) {
+        if (!restoreFocus || focus.sidebarHasFocus) return@LaunchedEffect
+        if (focus.focusedContentKey?.let { it !in keys } == true) {
+            focus.enterContent(allowHeaderFallback = false)
+            return@LaunchedEffect
+        }
+        val request = focus.request
+        if (!focus.canRequestContent(request)) return@LaunchedEffect
+        val index = restoredTvGridIndex(keys, bookmark.focusedKey, bookmark.focusedIndex)
+            ?: return@LaunchedEffect
+        val key = keys[index]
+        withFrameNanos { }
+        if (!focus.canRequestContent(request)) return@LaunchedEffect
+        if (grid.layoutInfo.visibleItemsInfo.none { it.key == key }) grid.scrollToItem(index)
+        if (requestTvFocus({ requesters[key] }, { focus.canRequestContent(request) })) {
+            focus.completeContentRequest(request, key)
         }
     }
     // A Boosty page may contain only text or images. Advance through those pages as well.
@@ -296,12 +335,16 @@ private fun TvVideoGrid(
             onLoadMore()
         }
     }
+    val loadMore = { focus.enterContent(allowHeaderFallback = false); onLoadMore() }
+    val retryPage = { focus.enterContent(allowHeaderFallback = false); onRetryPage() }
+    val refresh = { focus.enterContent(allowHeaderFallback = false); onRefresh() }
     if (cards.isEmpty()) {
+        val emptyFocus = focus.takeIf { restoreFocus }
         when {
-            pageError != null -> TvStatusPanel("Не удалось продолжить загрузку", pageError.description, Icons.Rounded.WarningAmber, "Повторить", onRetryPage, focus)
-            hasMore && (loadingMore || lastAutoPage != pageRequestKey) -> TvLoadingPanel("Ищем видео в публикациях…")
-            hasMore -> TvStatusPanel("В этой подборке пока нет видео", "Можно загрузить более ранние публикации.", Icons.Rounded.VideoLibrary, "Загрузить ещё", onLoadMore, focus)
-            else -> TvStatusPanel("Видео пока нет", "Здесь появятся видео из доступных публикаций.", Icons.Rounded.VideoLibrary, "Обновить", onRefresh, focus)
+            pageError != null -> TvStatusPanel("Не удалось продолжить загрузку", pageError.description, Icons.Rounded.WarningAmber, "Повторить", retryPage, emptyFocus)
+            hasMore && (loadingMore || lastAutoPage != pageRequestKey) -> TvLoadingPanel("Ищем видео в публикациях…", emptyFocus, fallbackRequester)
+            hasMore -> TvStatusPanel("В этой подборке пока нет видео", "Можно загрузить более ранние публикации.", Icons.Rounded.VideoLibrary, "Загрузить ещё", loadMore, emptyFocus)
+            else -> TvStatusPanel("Видео пока нет", "Здесь появятся видео из доступных публикаций.", Icons.Rounded.VideoLibrary, "Обновить", refresh, emptyFocus)
         }
         return
     }
@@ -329,8 +372,16 @@ private fun TvVideoGrid(
                             else -> false
                         }
                     },
-                    onFocused = { bookmark.focusedKey = card.key; focus.contentFocused() },
-                    onClick = { bookmark.focusedKey = card.key; onPlay(card) },
+                    onFocused = {
+                        bookmark.focusedKey = card.key
+                        bookmark.focusedIndex = index
+                        focus.itemFocused(card.key)
+                    },
+                    onClick = {
+                        bookmark.focusedKey = card.key
+                        bookmark.focusedIndex = index
+                        onPlay(card)
+                    },
                 )
             }
             if (loadingMore) item("loading_more", span = { GridItemSpan(maxLineSpan) }) {
@@ -342,11 +393,11 @@ private fun TvVideoGrid(
                 Column(Modifier.fillMaxWidth().padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(pageError.description, color = TvColors.Secondary, fontSize = 13.sp, maxLines = 3, textAlign = TextAlign.Center)
                     Spacer(Modifier.height(10.dp))
-                    TvActionButton("Повторить", onRetryPage, Modifier.leftToSidebar(focus), Icons.Rounded.Refresh, focus::contentFocused)
+                    TvActionButton("Повторить", retryPage, Modifier.leftToSidebar(focus), Icons.Rounded.Refresh, focus::contentFocused)
                 }
             } else if (hasMore) item("load_more", span = { GridItemSpan(maxLineSpan) }) {
                 Box(Modifier.fillMaxWidth().padding(top = 8.dp), contentAlignment = Alignment.Center) {
-                    TvActionButton("Загрузить ещё", onLoadMore, Modifier.leftToSidebar(focus), onFocused = focus::contentFocused)
+                    TvActionButton("Загрузить ещё", loadMore, Modifier.leftToSidebar(focus), onFocused = focus::contentFocused)
                 }
             } else item("end", span = { GridItemSpan(maxLineSpan) }) {
                 Text("Все видео загружены", color = TvColors.Secondary, fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(10.dp))
@@ -413,7 +464,24 @@ private fun TvVideoTile(
 }
 
 @Composable
-internal fun TvLoadingPanel(message: String) {
+internal fun TvLoadingPanel(
+    message: String,
+    focus: TvContentFocus? = null,
+    fallbackRequester: FocusRequester? = null,
+) {
+    LaunchedEffect(focus?.request, fallbackRequester) {
+        if (focus == null) return@LaunchedEffect
+        if (focus.focusedContentKey != null) {
+            focus.enterContent(allowHeaderFallback = false)
+            return@LaunchedEffect
+        }
+        val request = focus.request
+        if (fallbackRequester != null && focus.allowHeaderFallback && focus.canRequestContent(request)) {
+            if (requestTvFocus({ fallbackRequester }, { focus.canRequestContent(request) })) {
+                focus.completeContentRequest(request)
+            }
+        }
+    }
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         CircularProgressIndicator(Modifier.size(36.dp), color = TvColors.Accent, strokeWidth = 3.dp)
         Spacer(Modifier.height(18.dp))
@@ -432,8 +500,16 @@ internal fun TvStatusPanel(
 ) {
     val requester = remember { FocusRequester() }
     LaunchedEffect(focus?.request, action) {
-        if (action != null && focus?.sidebarHasFocus == false) {
-            requestTvFocus({ requester }, { focus?.sidebarHasFocus == false })
+        if (focus == null || action == null) return@LaunchedEffect
+        if (focus.focusedContentKey != null) {
+            focus.enterContent(allowHeaderFallback = false)
+            return@LaunchedEffect
+        }
+        val request = focus.request
+        if (focus.canRequestContent(request)) {
+            if (requestTvFocus({ requester }, { focus.canRequestContent(request) })) {
+                focus.completeContentRequest(request)
+            }
         }
     }
     Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
