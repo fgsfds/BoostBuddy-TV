@@ -1,13 +1,15 @@
 # Working on BoostBuddy TV
 
-This guide applies to the whole repository. BoostBuddy TV is an unofficial Android TV / Google TV fork of BoostBuddy, implemented with Kotlin Multiplatform, Compose, Decompose, Ktor, Kotlinx Serialization, Kodein, and Android Media3. The Android application ID is `ru.slartus.boostbuddy.tvfork`; the Kotlin package remains `ru.slartus.boostbuddy`.
+This is the shared repository guide for human contributors and automated coding tools. It applies to the whole repository and is the canonical source of project rules. The [development guide](docs/DEVELOPMENT.md) supplements it with implementation workflows and source examples.
+
+BoostBuddy TV is an unofficial Android TV / Google TV fork of BoostBuddy, implemented with Kotlin Multiplatform, Compose, Decompose, Ktor, Kotlinx Serialization, Kodein, and Android Media3. The Android application ID is `ru.slartus.boostbuddy.tvfork`; the Kotlin package remains `ru.slartus.boostbuddy`.
 
 ## Start here
 
 - Read [README_TV.md](README_TV.md) for installation, build, signing, and implementation details.
 - Read [docs/CODE_REVIEW_TV.md](docs/CODE_REVIEW_TV.md) before changing authentication, networking, playback, or TV navigation. It explains regressions that the current design prevents.
 - Use [VALIDATION_TV.md](VALIDATION_TV.md) for recorded evidence and limitations, not as proof that a later change passed.
-- Also read [CLAUDE.md](CLAUDE.md) and the relevant files in `.claude/rules/`. Their architectural guidance applies, but example helper names must be checked against the current source: this repository uses `BaseComponent`, `Inject`, and the custom `SessionTokenManager` authentication flow.
+- Read [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) when adding screens, navigation, or API integrations. Use the current `BaseComponent`, `Inject`, and `SessionTokenManager` APIs described there.
 - Inspect `git status` and the relevant diff before editing. Preserve unrelated work and coordinate file ownership when multiple agents share a checkout. Prefer `rg` for searches.
 - Follow the user's requested scope and existing authorization. Do not introduce another confirmation step for actions already authorized in the conversation. Commit, push, or publish when that work is within the authorized task; report the actual result.
 

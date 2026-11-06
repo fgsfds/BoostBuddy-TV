@@ -70,7 +70,7 @@ With **JDK 17**, Android SDK **35**, and Build Tools **35.x** configured:
 ./gradlew :composeApp:assembleDebug :composeApp:testDebugUnitTest
 ```
 
-The APK is written to `composeApp/build/outputs/apk/debug/composeApp-debug.apk`. Use `gradlew.bat` on Windows. See [README_TV.md](README_TV.md) for SDK setup, signing, installation, and the implementation map. [AGENTS.md](AGENTS.md) documents the repository workflow and implementation rules for coding agents.
+The APK is written to `composeApp/build/outputs/apk/debug/composeApp-debug.apk`. Use `gradlew.bat` on Windows. See [README_TV.md](README_TV.md) for SDK setup, signing, installation, and the implementation map. [AGENTS.md](AGENTS.md) contains shared project rules for contributors and coding tools; [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) covers screen, navigation, and API development.
 
 ## Validation and limits
 

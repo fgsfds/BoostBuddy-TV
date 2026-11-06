@@ -23,6 +23,10 @@ The follow-up review on 2026-11-06 adds:
 - Explicit TV focus ownership, grid/footer restoration, preserved search drafts, and per-account browse-state reset.
 - Unique lifecycle-bound exception handlers, safe root navigation, and website-view cleanup.
 - Expanded regression coverage and an updated [review report](docs/CODE_REVIEW_TV.md) and [validation record](VALIDATION_TV.md).
-- A root [AGENTS.md](AGENTS.md) documenting the current architecture, verification commands, and implementation rules for future coding-agent work.
+- A root [AGENTS.md](AGENTS.md) documenting the current architecture, verification commands, and implementation rules for all contributors and coding tools.
+
+## Shared development documentation
+
+The repository uses [AGENTS.md](AGENTS.md) as its canonical project guide, with practical screen, navigation, API, and review workflows in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Tool-specific instruction files, model assignments, settings, and hooks were removed. Useful architectural guidance was retained and corrected against the current implementation.
 
 The original source copyright notice remains in README.MD and docs/UPSTREAM_README.md; the Apache 2.0 license remains in LICENSE. No SmartTube source code or branding is included.

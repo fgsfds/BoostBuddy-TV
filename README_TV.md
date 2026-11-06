@@ -123,6 +123,8 @@ The fixture activity is included only in debug builds and has no launcher entry.
 
 ## Implementation map
 
+Use [AGENTS.md](AGENTS.md) for shared project rules and [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for implementation workflows and examples. Both guides apply to human contributors and automated coding tools.
+
 | Path | Responsibility |
 | --- | --- |
 | `composeApp/src/androidMain/kotlin/ru/slartus/boostbuddy/ui/tv/` | Native TV shell, grid, creator directory, focus, and saved browse state. |
