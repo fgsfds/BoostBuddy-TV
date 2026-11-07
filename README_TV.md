@@ -19,12 +19,20 @@ Based on upstream tag **1.16.0**, commit **b9acb6c2cde4f37907e70bf166a2f27c7d57c
 
 The interface retains BoostBuddy's Russian UI language. The main sidebar labels are **Лента** (Feed), **Подписки** (Subscriptions), **Поиск** (Search), **Настройки** (Settings), and **Выйти** (Sign out).
 
-## Download from GitHub Actions
+## Download from GitHub Releases
 
-1. Open [**Build TV APK**](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml) in the repository's Actions tab.
-2. Choose a successful run for the desired commit. Its summary links to **Download APK artifact** and the test/build reports. The APK artifact is also listed under **Artifacts** with a name beginning `BoostBuddy-TV-`.
-3. Sign in to GitHub if necessary, download the artifact ZIP, and extract it before installation.
-4. The extracted folder contains one APK, `SHA256SUMS`, `build-info.json`, and `INSTALL.txt`. `build-info.json` identifies the exact build/source commits and workflow run.
+1. Open the repository's [**Releases page**](https://github.com/fgsfds/BoostBuddy-TV/releases).
+2. Choose a **Pre-release** for the desired commit and workflow run.
+3. Under **Assets**, download the file ending in **`.apk`**. Public release assets can be downloaded without signing in to GitHub, and the APK does not need to be extracted from a ZIP.
+
+Each automated prerelease uploads these four files:
+
+| Asset | Purpose |
+| --- | --- |
+| `BoostBuddy-TV-…-debug.apk` | Installable debug APK for sideload testing. |
+| `SHA256SUMS` | SHA-256 checksum for the APK. |
+| `build-info.json` | Exact built/source commits, original build run (`runId`, `runNumber`, `runAttempt`), and APK metadata. |
+| `INSTALL.txt` | Installation and signing notes. |
 
 APK filenames follow this pattern:
 
@@ -32,16 +40,22 @@ APK filenames follow this pattern:
 BoostBuddy-TV-<version>-c<version-code>-<12-character-built-commit>-debug.apk
 ```
 
-Artifacts expire after **14 days**, subject to repository policy. Choose a newer run or use **Run workflow** to build again if an old artifact has expired. For a repository fork where GitHub has disabled inherited workflows, enable Actions before running the workflow.
+Release assets are not subject to the Actions artifact expiry, and the workflow does not automatically clean up releases. Automated entries are marked as prereleases and leave GitHub's stable **Latest** marker unchanged; use the Releases page to choose a build.
+
+### Actions artifacts and reports
+
+For pull-request APKs or build diagnostics, open [**Actions → Build TV APK**](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml) and select the desired run. A successful build provides an APK artifact whose name begins `BoostBuddy-TV-`; test/build reports are separate. Artifact downloads may require GitHub sign-in and arrive as ZIP archives that must be extracted.
+
+Actions APK artifacts and reports have **14-day retention**, subject to repository policy. An already published release remains available after its Actions artifact expires. If no usable build is available, **Run workflow** on a branch creates a new build and, after success, a prerelease. For a repository fork where GitHub has disabled inherited workflows, enable Actions before running it.
 
 ## Install the APK
 
 These are **debug builds for sideload testing**. Minimum Android version: **7.0 / API 24**.
 
-Transfer the extracted APK to the TV and install it using your preferred APK installer, allowing installation from that app if Android asks. Alternatively, with Android Platform Tools and an already connected TV, replace the path below with the extracted APK's actual filename:
+Transfer the downloaded APK to the TV and install it using your preferred APK installer, allowing installation from that app if Android asks. Alternatively, with Android Platform Tools and an already connected TV, replace the path below with the APK's actual filename:
 
 ```sh
-adb install -r path/to/extracted.apk
+adb install -r path/to/downloaded.apk
 ```
 
 Launch **BoostBuddy TV** from the TV's apps list. For a developer launch:
@@ -52,7 +66,9 @@ adb shell am start -n ru.slartus.boostbuddy.tvfork/ru.slartus.boostbuddy.TvAppAc
 
 ### Signing and later updates
 
-Android requires the same signing certificate to update an installed app in place. **Each fresh CI runner uses an ephemeral debug signing key**, so a later Actions APK may not install over an earlier build. If Android reports a signature mismatch, uninstall the previous fork build before installing the new one; uninstalling removes this app's local sign-in state and settings.
+Android requires the same signing certificate to update an installed app in place. **Each fresh CI build uses an ephemeral debug signing key**, so an APK from another build may not install over an earlier one. This applies to both release assets and Actions artifacts. If Android reports a signature mismatch, uninstall the previous fork build before installing the new one; uninstalling removes this app's local sign-in state and settings.
+
+Publishing or retrying a prerelease does not re-sign its APK or increment the Android version. The current app remains **1.16.0-tv.2 / version code 90** until the build configuration is changed explicitly. These are debug builds for sideload testing, not a Google Play distribution.
 
 For stable updates, build releases with your own persistent signing key. The repository does not contain a private signing key, and the default CI workflow needs no signing secrets. Upstream BoostBuddy remains a separate application.
 
@@ -92,11 +108,27 @@ composeApp/build/outputs/apk/debug/composeApp-debug.apk
 
 ### Continuous integration
 
-[`.github/workflows/build-tv.yml`](.github/workflows/build-tv.yml) runs on **every branch push, pull request, and manual dispatch**. It uses JDK 17 and Android SDK 35, validates the Gradle wrapper, assembles the debug APK, and runs `:composeApp:testDebugUnitTest`.
+[`.github/workflows/build-tv.yml`](.github/workflows/build-tv.yml) runs on **every branch push, pull request, and manual dispatch**. Its build job uses a read-only repository token, JDK 17 and Android SDK 35, validates the Gradle wrapper, runs the credential-free Python publishing checks in `.github/tests/`, assembles the debug APK, and runs `:composeApp:testDebugUnitTest`.
 
-A successful build/test step produces a commit-named APK artifact with a checksum, build metadata, and installation notes. Test/build reports are uploaded when available, including after failures. Both artifact types have **14-day retention**, subject to repository policy. Different commits have separate concurrency groups, so a newer push does not cancel an earlier commit's run.
+A successful build/test step produces the APK artifact with its checksum, metadata, and installation notes. Test/build reports are uploaded when available, including after failures. Both Actions artifact types have **14-day retention**, subject to repository policy.
 
-The workflow creates debug artifacts; it does not publish GitHub Releases or upload to Google Play. Check each Actions run for its own result. The local validation report is not a claim that every later CI build has passed.
+| Trigger | Build and test | Publish a prerelease |
+| --- | --- | --- |
+| Branch push | Yes | After the build succeeds. |
+| Manual dispatch on a branch | Yes | After the build succeeds. |
+| Pull request | Yes | No; artifacts and reports only, with no release write token. |
+
+Publication runs in a **separate job with `contents: write`**, after the successful read-only build, and only for eligible branch refs. Branch-deletion events and manual runs on tags do not publish. The publisher creates the tag `ci-<GITHUB_RUN_ID>-<GITHUB_RUN_ATTEMPT>` through GitHub's refs API at the exact built commit, using the current publication attempt. An existing-tag collision fails instead of moving the tag or overwriting a release. Each workflow run has its own concurrency group with cancellation disabled, so separate pipelines are preserved even when they build the same commit. A rerun uses a new attempt tag.
+
+The publisher downloads the successful build's artifact **by artifact ID** and uploads only the APK, `SHA256SUMS`, `build-info.json`, and `INSTALL.txt`. It keeps the release as a draft until all uploads finish and are verified, then publishes it with prerelease status and without changing the stable Latest marker. There is no automatic release cleanup and no Google Play upload.
+
+A **publish-only rerun** reuses the original successful build artifact; it does not rebuild or re-sign the APK. `build-info.json` preserves the original build's `runAttempt`, which may differ from the publication attempt in the new release tag and release notes. This keeps the published files, checksum, and certificate tied to the build that produced them. If that Actions artifact has expired, a new full build is needed to publish again.
+
+Check the run's build and publish jobs for their actual results. The local validation report does not establish that later pipelines or releases succeeded.
+
+#### Publication troubleshooting
+
+If the build succeeds but publication is denied, inspect the publisher log and repository workflow permissions. GitHub can require additional workflow permission to tag some older or non-default workflow commits. The publisher fails instead of silently targeting a different SHA; resolve permissions for the intended commit before retrying. The checked APK remains available as an Actions artifact while it is retained.
 
 ### Release signing
 

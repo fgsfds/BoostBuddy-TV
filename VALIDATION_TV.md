@@ -99,11 +99,19 @@ A GitHub Actions APK has its own checksum and signing certificate. Verify it aga
 
 ## GitHub Actions coverage
 
-The [Build TV APK workflow](.github/workflows/build-tv.yml) runs for every branch push, pull request, and manual dispatch. It assembles the debug APK and runs `:composeApp:testDebugUnitTest` before uploading an APK. APK filenames include the app version, version code, and built commit. The archive contains a checksum, `build-info.json`, and installation notes; test/build reports are a separate artifact.
+The [Build TV APK workflow](.github/workflows/build-tv.yml) runs for every branch push, pull request, and manual dispatch. Its read-only build job assembles the debug APK and runs `:composeApp:testDebugUnitTest` before uploading the APK artifact. APK filenames include the app version, version code, and built commit; test/build reports are a separate artifact.
 
-Both artifact types are retained for **14 days**, subject to repository policy. Fresh runners use ephemeral debug keys, so a later CI APK may require uninstalling a previous build. A persistent owner-controlled release key is needed for stable in-place updates. See the [installation and signing guide](README_TV.md).
+The workflow also runs credential-free Python checks of the publishing scripts in `.github/tests/`. Those checks are separate from the historic Android test totals recorded above.
 
-Consult the [Actions run](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml) for the desired commit to see that CI build's actual result. This local validation does not imply that later builds passed.
+After a successful branch-push or manual run on a branch, a separate job with `contents: write` is configured to publish a new prerelease tagged `ci-<GITHUB_RUN_ID>-<GITHUB_RUN_ATTEMPT>` at the exact built commit. Pull requests retain their artifacts and reports without release publication or a release write token; branch deletions and tag refs do not publish. Separate workflow-run concurrency groups with cancellation disabled preserve independent pipelines, including those for the same commit. The publisher fails on a tag collision or permission rejection instead of moving a tag or changing the target commit.
+
+The release stays in draft until its APK, `SHA256SUMS`, `build-info.json`, and `INSTALL.txt` are uploaded and verified; it is then published as a prerelease without changing the stable Latest marker. Reruns use a new publication-attempt tag. A publish-only rerun downloads the original successful build artifact by ID and preserves its original build `runAttempt` metadata, APK bytes, and certificate without rebuilding or re-signing; release notes identify the separate publication attempt.
+
+The public [Releases page](https://github.com/fgsfds/BoostBuddy-TV/releases) provides direct APK downloads without an artifact ZIP or GitHub sign-in. Actions APK artifacts and reports retain their **14-day** lifetime, subject to repository policy. Release assets are not subject to that artifact expiry, and the workflow does not automatically delete releases.
+
+Fresh builds still use ephemeral debug keys, so an APK from another build may require uninstalling a previous installation. A persistent owner-controlled release key is needed for stable in-place updates; see the [installation and signing guide](README_TV.md).
+
+Consult the [Actions run](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml) and its release for the desired commit to see the actual build and publication results. This section describes the current CI configuration; the historic local checks above do not establish that a later pipeline or release succeeded.
 
 ## Account and hardware coverage
 

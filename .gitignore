@@ -18,3 +18,4 @@ keystore/
 *yarn.lock
 keystore.properties
 .kotlin
+__pycache__/

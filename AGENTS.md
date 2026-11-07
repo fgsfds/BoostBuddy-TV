@@ -33,8 +33,9 @@ Shared Kotlin paths below are relative to `composeApp/src/commonMain/kotlin/ru/s
 | Android `ui/widgets/WebView.kt`, `data/ktor/HttpEngineFactory.kt` | Website fallback, cookie-origin filtering, WebView cleanup, Android TLS behavior. |
 | `composeApp/src/commonTest/` | Shared logic, coroutine/component and mock HTTP regression tests. |
 | `composeApp/src/androidUnitTest/` | Android engine tests, including loopback HTTPS trust/hostname verification. |
+| `.github/tests/` | Credential-free tests of artifact validation and prerelease publishing failure paths. |
 | `composeApp/src/androidDebug/`, `composeApp/src/debug/` | Debug-only offline screenshot activity and manifest entry. |
-| `composeApp/build.gradle.kts`, `gradle/libs.versions.toml`, `.github/workflows/build-tv.yml` | Android identity/signing, dependency versions, APK/test CI gate and artifacts. |
+| `composeApp/build.gradle.kts`, `gradle/libs.versions.toml`, `.github/workflows/build-tv.yml` | Android identity/signing, dependency versions, APK/test CI gate, artifacts, and prerelease publishing. |
 
 The inherited iOS target remains in the tree. Keep shared code portable and preserve `expect`/`actual` contracts; Android verification does not establish an iOS build or runtime result.
 
@@ -59,6 +60,7 @@ Run commands from the repository root. Start with the tests relevant to the chan
 For code or build changes, the required final Android gate is the same APK-and-test task combination used by CI:
 
 ```sh
+python3 -m unittest discover -s .github/tests -p 'test_*.py' -v
 ./gradlew :composeApp:assembleDebug :composeApp:testDebugUnitTest \
   --no-daemon --stacktrace --console=plain
 git diff --check
@@ -118,8 +120,11 @@ Separate evidence clearly: source review, mock/loopback tests, emulator renderin
 
 ## CI, signing, and attribution
 
-- `.github/workflows/build-tv.yml` builds on branch pushes, pull requests, and manual dispatch. APK upload follows successful assembly/tests; reports are separate artifacts. Use the run's metadata and checksum to identify the exact artifact. A local pass does not imply a later CI pass.
-- CI artifacts are debug builds with ephemeral runner keys. A later APK may have a different certificate and require uninstalling the previous build, which removes its local app data. Do not promise in-place updates between arbitrary CI runs.
+- `.github/workflows/build-tv.yml` builds and tests on branch pushes, pull requests, and manual dispatch with a read-only repository token. A separate `contents: write` job publishes a prerelease after a successful branch-push or manual run on a branch; branch deletions and tag refs do not publish. Pull requests retain APK/report artifacts and must never receive the release job's write token.
+- Preserve one release per eligible run/publication attempt, tagged `ci-<GITHUB_RUN_ID>-<GITHUB_RUN_ATTEMPT>` at the exact built commit through GitHub's refs API. Keep concurrency unique to the workflow run with cancellation disabled so pipelines for the same commit do not cancel each other. Permission failures and tag collisions must fail without retargeting another SHA, moving a tag, or overwriting a release.
+- Keep a release in draft until its four assets—the APK, `SHA256SUMS`, `build-info.json`, and `INSTALL.txt`—are uploaded and verified. Publish it as a prerelease without changing the stable Latest marker. Download the successful build artifact by ID; a publish-only rerun must reuse its files and retain the original `runId`, `runNumber`, and build `runAttempt` metadata rather than rebuild or re-sign them. Release notes identify the separate publication attempt.
+- The public Releases page is the primary APK download path. Actions artifacts/reports retain their 14-day lifetime; release assets are outside that artifact expiry and have no automatic cleanup. Use the build metadata and checksum to identify the exact APK, and verify the actual publish job/release before reporting success. A local pass does not imply a later CI pass.
+- Prereleases contain debug APKs with ephemeral build-runner keys. Publishing them does not increment the Android version or create a Play Store release. An APK from another build may have a different certificate and require uninstalling the previous build, which removes its local app data. Do not promise in-place updates between arbitrary CI builds.
 - Stable releases use an owner-controlled persistent key through the `BOOSTBUDDY_TV_KEYSTORE_FILE`, `BOOSTBUDDY_TV_STORE_PASSWORD`, `BOOSTBUDDY_TV_KEY_ALIAS`, and `BOOSTBUDDY_TV_KEY_PASSWORD` environment variables. Without the full signing configuration, release output is unsigned. Never commit keys, passwords, tokens, or local signing/SDK configuration.
 - Preserve the separate fork application identity, disabled upstream APK-update behavior, disabled Android app-data backup, and removal of the upstream analytics SDK.
 - Preserve [LICENSE](LICENSE), upstream copyright/credits in [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md), and the modification record in [TV_FORK_CHANGES.md](TV_FORK_CHANGES.md). The project is Apache 2.0; the TV layout's inspiration does not authorize importing incompatibly licensed source or branding.

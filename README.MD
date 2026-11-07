@@ -4,7 +4,7 @@ A native Boosty client for **Google TV and Android TV**, built around a remote: 
 
 [![Build TV APK](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml/badge.svg)](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml)
 
-[**Download an APK**](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml) · [Installation and build guide](README_TV.md) · [Validation](VALIDATION_TV.md) · [Code review](docs/CODE_REVIEW_TV.md)
+[**Download an APK**](https://github.com/fgsfds/BoostBuddy-TV/releases) · [Installation and build guide](README_TV.md) · [Validation](VALIDATION_TV.md) · [Code review](docs/CODE_REVIEW_TV.md)
 
 An independent fork of [slartus/BoostBuddy](https://github.com/slartus/BoostBuddy), based on version **1.16.0**. This is an unofficial client; watching paid content requires access through your own Boosty account.
 
@@ -47,14 +47,15 @@ Actual, unedited captures from an Android TV emulator at **1280 × 720**. Click 
 
 ## Get an APK
 
-1. Open [**Actions → Build TV APK**](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml).
-2. Select a successful run for the commit you want, then use **Download APK artifact** in its summary, or the artifact whose name starts with `BoostBuddy-TV-`.
-3. Sign in to GitHub if needed, download the artifact **ZIP**, and extract it. It contains the APK, `SHA256SUMS`, `build-info.json`, and installation notes.
-4. Transfer the extracted APK to your TV and install it with an APK installer or `adb`. Launch **BoostBuddy TV**.
+1. Open [**Releases**](https://github.com/fgsfds/BoostBuddy-TV/releases) and choose a prerelease for the commit you want.
+2. Under **Assets**, download the file ending in **`.apk`** directly. Public release downloads require no GitHub sign-in or artifact ZIP extraction. The same entry includes `SHA256SUMS`, `build-info.json`, and `INSTALL.txt`.
+3. Transfer the downloaded APK to your TV and install it with an APK installer or `adb`. Launch **BoostBuddy TV**.
 
-The [workflow](.github/workflows/build-tv.yml) builds and runs unit tests on **every branch push, pull request, and manual run**. APK filenames include the app version, version code, and built commit. APKs and reports are retained for **14 days**, subject to repository policy; failed builds do not publish an APK.
+The [workflow](.github/workflows/build-tv.yml) builds and runs unit tests on **every branch push, pull request, and manual run**. Each successful branch-push or manual run on a branch publishes a new prerelease, tagged `ci-<run-id>-<publish-attempt>`, for the exact built commit. Pull requests produce Actions artifacts and reports without publishing a release.
 
-**Signing and updates:** CI produces debug APKs with a fresh runner's debug key. A later CI build may require uninstalling the previous one, which removes local sign-in and settings. For updates that install over one another, use a persistent signing key you control; see [release signing](README_TV.md#release-signing). CI artifacts are not GitHub Releases or a Play Store distribution.
+Release assets are not subject to the **14-day** Actions artifact expiry, and the workflow does not automatically delete releases. [Actions APK artifacts and test reports](https://github.com/fgsfds/BoostBuddy-TV/actions/workflows/build-tv.yml) remain available for 14 days, subject to repository policy. See the [CI guide](README_TV.md#continuous-integration) for reruns and publication details.
+
+**Signing and updates:** These prereleases contain **debug APKs**. Each fresh CI build uses an ephemeral debug key, so an APK from another build may require uninstalling the previous one, which removes local sign-in and settings. For stable in-place updates, use a persistent signing key you control; see [release signing](README_TV.md#release-signing). Publishing a prerelease does not change the Android app version or make it a Play Store release.
 
 ## Sign in
 

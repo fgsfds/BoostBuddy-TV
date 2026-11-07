@@ -9,17 +9,19 @@ on:
 permissions:
   contents: read
 
-# Keep each push's build when a branch receives a newer commit; only duplicate
-# runs for the same event, ref, and commit can cancel each other.
+# Each pipeline gets its own release, even when two runs build the same commit.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ github.sha }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   android-debug:
     name: Debug APK and unit tests
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    outputs:
+      apk_artifact_id: ${{ steps.apk.outputs.artifact-id }}
+      build_attempt: ${{ github.run_attempt }}
     defaults:
       run:
         shell: bash
@@ -51,7 +53,9 @@ jobs:
 
       - name: Build and test TV app
         id: build
-        run: ./gradlew :composeApp:assembleDebug :composeApp:testDebugUnitTest --no-daemon --stacktrace --console=plain
+        run: |
+          python3 -m unittest discover -s .github/tests -p 'test_*.py' -v
+          ./gradlew :composeApp:assembleDebug :composeApp:testDebugUnitTest --no-daemon --stacktrace --console=plain
 
       - name: Package the validated APK
         id: package
@@ -98,13 +102,17 @@ jobs:
               "ref": os.environ["GITHUB_REF"],
               "event": os.environ["GITHUB_EVENT_NAME"],
               "workflowRun": run_url,
+              "runId": int(os.environ["GITHUB_RUN_ID"]),
+              "runNumber": int(os.environ["GITHUB_RUN_NUMBER"]),
+              "runAttempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
               "apk": apk.name,
               "sha256": checksum,
               "signing": "Ephemeral Android debug key generated on this CI runner",
           }
           (destination / "build-info.json").write_text(json.dumps(info, indent=2) + "\n")
           (destination / "INSTALL.txt").write_text(
-              "Extract this archive and sideload the .apk onto your Android TV / Google TV.\n"
+              "Download the .apk from the prerelease Assets, or extract the Actions artifact.\n"
+              "Sideload the .apk onto your Android TV / Google TV.\n"
               f"With Android platform-tools: adb install \"{apk.name}\"\n\n"
               "Each fresh CI runner generates its own debug signing key. To install a later\n"
               "CI build, you may need to uninstall the previous one first. Uninstalling\n"
@@ -196,9 +204,202 @@ jobs:
           summary.extend([
               "",
               "Artifacts are retained for **14 days**, subject to repository policy. "
-              "This workflow requires no signing secrets and does not publish GitHub releases.",
+              "Successful branch pushes and manual branch runs publish a prerelease in the next job. "
+              "Pull-request builds retain these artifacts without publishing a release. "
+              "This workflow requires no signing secrets.",
               "",
           ])
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary_file:
               summary_file.write("\n".join(summary))
+          PY
+
+  publish-prerelease:
+    name: Publish pipeline prerelease
+    needs: android-debug
+    if: >-
+      ${{ needs.android-debug.result == 'success' &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+          github.ref_type == 'branch' && github.event.deleted != true }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      # Use the immutable ID: a publisher-only rerun reuses the successful build's
+      # artifact and original build attempt, not its new publishing attempt.
+      - name: Download validated APK
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.android-debug.outputs.apk_artifact_id }}
+          path: dist
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Verify release assets and prepare notes
+        id: prepare_release
+        env:
+          BUILD_ATTEMPT: ${{ needs.android-debug.outputs.build_attempt }}
+        run: |
+          python3 <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+
+          destination = Path("dist")
+          info_path = destination / "build-info.json"
+          if info_path.is_symlink():
+              raise SystemExit("Build metadata must be a regular artifact file.")
+          info = json.loads(info_path.read_text())
+          commit = os.environ["GITHUB_SHA"]
+          run_id = int(os.environ["GITHUB_RUN_ID"])
+          attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          build_attempt = int(os.environ["BUILD_ATTEMPT"])
+          run_url = (
+              f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
+              f"/actions/runs/{run_id}"
+          )
+          expected = {
+              "applicationId": "ru.slartus.boostbuddy.tvfork",
+              "builtCommit": commit,
+              "sourceCommit": commit,
+              "runId": run_id,
+              "runNumber": int(os.environ["GITHUB_RUN_NUMBER"]),
+              "runAttempt": build_attempt,
+              "ref": os.environ["GITHUB_REF"],
+              "event": os.environ["GITHUB_EVENT_NAME"],
+              "workflowRun": run_url,
+          }
+          if any(info.get(key) != value for key, value in expected.items()):
+              raise SystemExit("Artifact provenance does not match this successful build.")
+          version = info.get("versionName", "")
+          code = info.get("versionCode")
+          if (not isinstance(version, str) or not version.strip()
+                  or any(ord(character) < 32 for character in version)
+                  or type(code) is not int or code < 1):
+              raise SystemExit("Invalid APK version metadata.")
+          filename_version = re.sub(r"[^A-Za-z0-9._-]", "_", version)
+          apk_name = f"BoostBuddy-TV-{filename_version}-c{code}-{commit[:12]}-debug.apk"
+          if info.get("apk") != apk_name:
+              raise SystemExit("Unexpected APK filename in build metadata.")
+          names = [apk_name, "SHA256SUMS", "build-info.json", "INSTALL.txt"]
+          if {path.name for path in destination.iterdir()} != set(names):
+              raise SystemExit("Expected exactly one APK, checksum, metadata, and installation notes.")
+          assets = []
+          for name in names:
+              path = destination / name
+              if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f"Invalid release asset: {name}")
+              assets.append({
+                  "name": name,
+                  "path": str(path),
+                  "size": path.stat().st_size,
+                  "digest": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+              })
+          checksum = assets[0]["digest"].removeprefix("sha256:")
+          if info.get("sha256") != checksum:
+              raise SystemExit("APK checksum does not match build metadata.")
+          if (destination / "SHA256SUMS").read_text() != f"{checksum}  {apk_name}\n":
+              raise SystemExit("SHA256SUMS does not match the validated APK.")
+          tag = f"ci-{run_id}-{attempt}"
+          release = {
+              "tag": tag,
+              "commit": commit,
+              "title": f"BoostBuddy TV {version} — build #{info['runNumber']}.{attempt}",
+              "assets": assets,
+          }
+          Path("release.json").write_text(json.dumps(release, indent=2) + "\n")
+          notes = [
+              "Automated prerelease from a successful APK build and test run.",
+              "",
+              f"- Version: **{version}** (code {code})",
+              f"- Built commit: `{commit}`",
+              f"- Source ref: `{info['ref']}`",
+              f"- Build attempt: **{build_attempt}**; publish attempt: **{attempt}**",
+              f"- [Workflow run]({run_url})",
+              "",
+              "Download the **.apk** under Assets and sideload it on Android TV / Google TV. "
+              "SHA256SUMS, build-info.json, and INSTALL.txt accompany the same APK.",
+              "",
+              "**Signing:** this is a debug APK with this build runner's temporary key. "
+              "A later build may require uninstalling the previous one, removing local sign-in "
+              "and settings. Use a persistent release key for stable in-place updates.",
+              "",
+              "Release assets are retained separately from the 14-day Actions artifacts.",
+          ]
+          Path("release-notes.md").write_text("\n".join(notes) + "\n")
+          PY
+
+      # No checkout, Gradle, or downloaded executable code runs in this job.
+      # The token is supplied only to the publishing step.
+      - name: Publish complete prerelease
+        id: publish_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          def gh(*arguments):
+              result = subprocess.run(["gh", *arguments], capture_output=True, text=True)
+              if result.returncode:
+                  raise SystemExit(
+                      "Prerelease publication failed; the validated Actions artifact is retained.\n"
+                      + result.stderr
+                  )
+              return result.stdout
+
+          def gh_json(*arguments):
+              return json.loads(gh(*arguments))
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          release = json.loads(Path("release.json").read_text())
+          tag = release["tag"]
+          # A collision fails rather than moving an existing tag to another SHA.
+          ref = gh_json(
+              "api", "--method", "POST", f"repos/{repo}/git/refs",
+              "-f", f"ref=refs/tags/{tag}", "-f", f"sha={release['commit']}",
+          )
+          if ref["object"]["type"] != "commit" or ref["object"]["sha"] != release["commit"]:
+              raise SystemExit("Release tag does not point to the exact built commit.")
+          gh(
+              "release", "create", tag, *[asset["path"] for asset in release["assets"]],
+              "--repo", repo, "--verify-tag", "--draft", "--prerelease", "--latest=false",
+              "--title", release["title"], "--notes-file", "release-notes.md",
+          )
+          view = gh_json("release", "view", tag, "--repo", repo, "--json", "databaseId")
+          endpoint = f"repos/{repo}/releases/{view['databaseId']}"
+          draft = gh_json("api", endpoint)
+          if not draft["draft"] or not draft["prerelease"] or draft["tag_name"] != tag:
+              raise SystemExit("Expected an unpublished prerelease draft for this run.")
+          uploaded = draft["assets"]
+          if len(uploaded) != len(release["assets"]) or {a["name"] for a in uploaded} != {
+              a["name"] for a in release["assets"]
+          }:
+              raise SystemExit("Release draft does not contain all expected assets.")
+          by_name = {asset["name"]: asset for asset in uploaded}
+          for expected in release["assets"]:
+              actual = by_name[expected["name"]]
+              if (actual["state"] != "uploaded" or actual["size"] != expected["size"]
+                      or actual.get("digest") != expected["digest"]):
+                  raise SystemExit(f"Uploaded release asset failed verification: {expected['name']}")
+          gh("release", "edit", tag, "--repo", repo, "--draft=false", "--prerelease", "--latest=false")
+          published = gh_json("api", endpoint)
+          if published["draft"] or not published["prerelease"] or published["tag_name"] != tag:
+              raise SystemExit("GitHub did not publish the expected prerelease.")
+          url = published["html_url"]
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              output.write(f"url={url}\n")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
+              summary.write(f"## Pipeline prerelease\n\n[Download prerelease APK]({url})\n\n")
+              summary.write(f"Tag: `{tag}` · Built commit: `{release['commit']}`\n")
+          print(f"Published prerelease: {url}")
           PY
